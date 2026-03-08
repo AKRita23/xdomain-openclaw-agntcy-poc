@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  # --- AGNTCY Identity Service (Node Backend) ---
+  agntcy-identity:
+    image: node:20-slim
+    working_dir: /app
+    volumes:
+      - ./identity-service:/app
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - ISSUER_DID=${AGNTCY_ISSUER_DID}
+    command: ["echo", "TODO: mount agntcy/identity backend here"]
+
+  # --- OpenClaw Agent ---
+  openclaw-agent:
+    build: .
+    depends_on:
+      - agntcy-identity
+      - salesforce-mcp
+      - gcal-mcp
+      - slack-mcp
+    env_file:
+      - .env
+    environment:
+      - AGNTCY_IDENTITY_SERVICE_URL=http://agntcy-identity:8080
+      - SALESFORCE_MCP_URL=http://salesforce-mcp:9001
+      - GCAL_MCP_URL=http://gcal-mcp:9002
+      - SLACK_MCP_URL=http://slack-mcp:9003
+
+  # --- MCP Server stubs ---
+  salesforce-mcp:
+    build: .
+    command: ["python", "-m", "mcp_servers.salesforce_mcp"]
+    ports:
+      - "9001:9001"
+    env_file:
+      - .env
+
+  gcal-mcp:
+    build: .
+    command: ["python", "-m", "mcp_servers.gcal_mcp"]
+    ports:
+      - "9002:9002"
+    env_file:
+      - .env
+
+  slack-mcp:
+    build: .
+    command: ["python", "-m", "mcp_servers.slack_mcp"]
+    ports:
+      - "9003:9003"
+    env_file:
+      - .env
