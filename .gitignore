@@ -1,0 +1,42 @@
+# Environment & secrets
+.env
+*.pem
+*.key
+vault.json
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# AGNTCY Identity
+~/.identity/
+*.vault.json
+
+# Node (for AGNTCY Node Backend)
+node_modules/
+npm-debug.log
