@@ -1,5 +1,6 @@
 """Tests for the OpenClaw agent orchestrator."""
 import pytest
+from unittest.mock import AsyncMock, patch
 from agent.openclaw_agent import OpenClawAgent
 from agent.config import AgentConfig
 from agent.task_context import TaskContext
@@ -10,9 +11,9 @@ def agent():
     config = AgentConfig(
         agent_id="test-agent-001",
         identity_service_url="http://localhost:8080",
-        okta_domain="dev-test.okta.com",
-        okta_client_id="test-client-id",
-        okta_client_secret="test-client-secret",
+        auth0_domain="dev-test.us.auth0.com",
+        auth0_client_id="test-client-id",
+        auth0_client_secret="test-client-secret",
         delegating_user="sarah@example.com",
     )
     return OpenClawAgent(config)
@@ -20,7 +21,16 @@ def agent():
 
 @pytest.mark.asyncio
 async def test_execute_task(agent):
-    result = await agent.execute_task("Test cross-domain task")
+    # Mock the Auth0 token exchange to avoid real HTTP calls
+    mock_response = {
+        "access_token": "test-access-token-placeholder",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "contacts.read",
+    }
+    with patch.object(agent.xaa_client, "exchange_token",
+                      new_callable=AsyncMock, return_value=mock_response):
+        result = await agent.execute_task("Test cross-domain task")
     assert "task_id" in result
     assert "delegation_chain" in result
     assert "results" in result

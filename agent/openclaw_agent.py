@@ -4,7 +4,7 @@ OpenClaw Cross-Domain Agent — Version A (AGNTCY Identity Service TBAC).
 Orchestrates task execution across Salesforce, Google Calendar, and Slack
 MCP servers on behalf of a delegating user (Sarah), using:
   - AGNTCY Identity badges for agent identity attestation
-  - Okta XAA (RFC 8693) for cross-domain token exchange
+  - Auth0 XAA (RFC 8693) for cross-domain token exchange
   - IdentityServiceMCPMiddleware for TBAC enforcement
 """
 import asyncio
@@ -15,7 +15,7 @@ from agent.config import AgentConfig
 from agent.task_context import TaskContext
 from identity.badge_issuer import BadgeIssuer
 from identity.badge_verifier import BadgeVerifier
-from identity.okta_xaa import OktaXAAClient
+from identity.okta_xaa import Auth0XAAClient
 from middleware.agntcy_tbac import IdentityServiceMCPMiddleware
 from mcp_servers.salesforce_mcp import SalesforceMCPClient
 from mcp_servers.gcal_mcp import GCalMCPClient
@@ -32,7 +32,7 @@ class OpenClawAgent:
       1. Receive task from delegating user
       2. Obtain AGNTCY identity badge
       3. For each target MCP server:
-         a. Exchange token via Okta XAA (RFC 8693)
+         a. Exchange token via Auth0 XAA (RFC 8693)
          b. TBAC middleware validates badge + scopes
          c. Execute MCP tool call
       4. Aggregate results and return to user
@@ -42,10 +42,11 @@ class OpenClawAgent:
         self.config = config or AgentConfig()
         self.badge_issuer = BadgeIssuer(self.config.identity_service_url)
         self.badge_verifier = BadgeVerifier(self.config.identity_service_url)
-        self.xaa_client = OktaXAAClient(
-            domain=self.config.okta_domain,
-            client_id=self.config.okta_client_id,
-            client_secret=self.config.okta_client_secret,
+        self.xaa_client = Auth0XAAClient(
+            domain=self.config.auth0_domain,
+            client_id=self.config.auth0_client_id,
+            client_secret=self.config.auth0_client_secret,
+            secret_arn=self.config.auth0_secret_arn,
         )
         self.middleware = IdentityServiceMCPMiddleware(
             identity_service_url=self.config.identity_service_url,
@@ -106,7 +107,7 @@ class OpenClawAgent:
         scopes: List[str],
     ) -> Any:
         """Call a single MCP server with full identity chain."""
-        # Token exchange via Okta XAA
+        # Token exchange via Auth0 XAA
         xaa_token = await self.xaa_client.exchange_token(
             subject_token=ctx.identity_badge.get("jwt", ""),
             target_audience=auth_domain,
