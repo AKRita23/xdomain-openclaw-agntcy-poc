@@ -15,42 +15,13 @@ services:
     command: ["echo", "TODO: mount agntcy/identity backend here"]
 
   # --- OpenClaw Agent ---
+  # Connects to official Salesforce, Google, and Slack MCP servers
+  # (no local MCP server containers needed)
   openclaw-agent:
     build: .
     depends_on:
       - agntcy-identity
-      - salesforce-mcp
-      - gcal-mcp
-      - slack-mcp
     env_file:
       - .env
     environment:
       - AGNTCY_IDENTITY_SERVICE_URL=http://agntcy-identity:8080
-      - SALESFORCE_MCP_URL=http://salesforce-mcp:9001
-      - GCAL_MCP_URL=http://gcal-mcp:9002
-      - SLACK_MCP_URL=http://slack-mcp:9003
-
-  # --- MCP Server stubs ---
-  salesforce-mcp:
-    build: .
-    command: ["python", "-m", "mcp_servers.salesforce_mcp"]
-    ports:
-      - "9001:9001"
-    env_file:
-      - .env
-
-  gcal-mcp:
-    build: .
-    command: ["python", "-m", "mcp_servers.gcal_mcp"]
-    ports:
-      - "9002:9002"
-    env_file:
-      - .env
-
-  slack-mcp:
-    build: .
-    command: ["python", "-m", "mcp_servers.slack_mcp"]
-    ports:
-      - "9003:9003"
-    env_file:
-      - .env

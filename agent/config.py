@@ -6,10 +6,11 @@ from typing import Dict, List, Optional
 
 @dataclass
 class MCPServerConfig:
-    """Configuration for an MCP server connection."""
+    """Configuration for connecting to an official MCP server."""
     name: str
     url: str
     auth_domain: str
+    transport: str = "sse"  # "sse" (HTTP+SSE) or "stdio"
     scopes: List[str] = field(default_factory=list)
 
 
@@ -23,32 +24,40 @@ class AgentConfig:
     identity_service_url: str = os.getenv("AGNTCY_IDENTITY_SERVICE_URL", "http://localhost:8080")
     issuer_did: str = os.getenv("AGNTCY_ISSUER_DID", "")
 
-    # Okta XAA (RFC 8693 Token Exchange)
+    # Auth0 (agent identity — client_credentials)
+    auth0_domain: str = os.getenv("AUTH0_DOMAIN", "")
+    auth0_client_id: str = os.getenv("AUTH0_CLIENT_ID", "")
+    auth0_client_secret: str = os.getenv("AUTH0_CLIENT_SECRET", "")
+    auth0_secret_arn: Optional[str] = os.getenv("AUTH0_SECRET_ARN")
+
+    # Okta (RFC 8693 token exchange)
     okta_domain: str = os.getenv("OKTA_DOMAIN", "")
-    okta_client_id: str = os.getenv("OKTA_CLIENT_ID", "")
-    okta_client_secret: str = os.getenv("OKTA_CLIENT_SECRET", "")
+    okta_auth_server_id: str = os.getenv("OKTA_AUTH_SERVER_ID", "default")
 
     # Delegating user
     delegating_user: str = os.getenv("DELEGATING_USER", "sarah@example.com")
 
-    # MCP Server targets
+    # Official MCP Server connections
     mcp_servers: Dict[str, MCPServerConfig] = field(default_factory=lambda: {
         "salesforce": MCPServerConfig(
             name="salesforce",
-            url=os.getenv("SALESFORCE_MCP_URL", "http://localhost:9001"),
+            url=os.getenv("SALESFORCE_MCP_URL", ""),
             auth_domain="salesforce.com",
+            transport="sse",
             scopes=["contacts.read", "contacts.write", "opportunities.read"],
         ),
         "gcal": MCPServerConfig(
             name="gcal",
-            url=os.getenv("GCAL_MCP_URL", "http://localhost:9002"),
+            url=os.getenv("GCAL_MCP_URL", ""),
             auth_domain="googleapis.com",
+            transport="sse",
             scopes=["calendar.events.read", "calendar.events.write"],
         ),
         "slack": MCPServerConfig(
             name="slack",
-            url=os.getenv("SLACK_MCP_URL", "http://localhost:9003"),
+            url=os.getenv("SLACK_MCP_URL", ""),
             auth_domain="slack.com",
+            transport="sse",
             scopes=["chat.write", "channels.read"],
         ),
     })
