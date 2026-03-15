@@ -1,9 +1,9 @@
-"""Tests for identity badge issuance, verification, and Auth0 XAA."""
+"""Tests for identity badge issuance, verification, and Okta XAA."""
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from identity.badge_issuer import BadgeIssuer
 from identity.badge_verifier import BadgeVerifier
-from identity.okta_xaa import Auth0XAAClient, TokenExchangeError, _resolve_client_secret
+from identity.okta_xaa import OktaXAAClient, TokenExchangeError
 
 
 @pytest.fixture
@@ -18,10 +18,11 @@ def verifier():
 
 @pytest.fixture
 def xaa_client():
-    return Auth0XAAClient(
-        domain="dev-test.us.auth0.com",
+    return OktaXAAClient(
+        domain="dev-test.okta.com",
         client_id="test-client-id",
         client_secret="test-client-secret",
+        auth_server_id="default",
     )
 
 
@@ -53,12 +54,12 @@ async def test_verify_invalid_badge(verifier):
     assert result["valid"] is False
 
 
-def test_auth0_client_token_endpoint(xaa_client):
-    assert xaa_client.token_endpoint == "https://dev-test.us.auth0.com/oauth/token"
+def test_okta_client_token_endpoint(xaa_client):
+    assert xaa_client.token_endpoint == "https://dev-test.okta.com/oauth2/default/v1/token"
 
 
 @pytest.mark.asyncio
-async def test_auth0_exchange_success(xaa_client):
+async def test_okta_exchange_success(xaa_client):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {
@@ -82,7 +83,7 @@ async def test_auth0_exchange_success(xaa_client):
 
 
 @pytest.mark.asyncio
-async def test_auth0_exchange_falls_back_on_unsupported_grant(xaa_client):
+async def test_okta_exchange_falls_back_on_unsupported_grant(xaa_client):
     """When RFC 8693 fails with unsupported_grant_type, falls back to client_credentials."""
     rfc8693_response = MagicMock()
     rfc8693_response.status_code = 403
@@ -113,7 +114,7 @@ async def test_auth0_exchange_falls_back_on_unsupported_grant(xaa_client):
 
 
 @pytest.mark.asyncio
-async def test_auth0_exchange_raises_on_other_errors(xaa_client):
+async def test_okta_exchange_raises_on_other_errors(xaa_client):
     error_response = MagicMock()
     error_response.status_code = 401
     error_response.json.return_value = {"error": "invalid_client"}
@@ -130,11 +131,3 @@ async def test_auth0_exchange_raises_on_other_errors(xaa_client):
                 subject_token="badge-jwt",
                 target_audience="salesforce.com",
             )
-
-
-def test_resolve_client_secret_from_env():
-    assert _resolve_client_secret("my-secret") == "my-secret"
-
-
-def test_resolve_client_secret_from_env_when_arn_is_none():
-    assert _resolve_client_secret("my-secret", secret_arn=None) == "my-secret"

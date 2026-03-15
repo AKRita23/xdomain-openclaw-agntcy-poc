@@ -1,13 +1,12 @@
 """
-Auth0 XAA Token Exchange (RFC 8693).
+Okta XAA Token Exchange (RFC 8693).
 
-Implements the OAuth 2.0 Token Exchange flow via Auth0 to obtain
+Implements the OAuth 2.0 Token Exchange flow via Okta to obtain
 domain-specific access tokens for cross-domain delegation.
 
 Falls back to client_credentials grant with badge context when
-the Auth0 tenant does not support the token-exchange grant type.
+the Okta authorization server does not support the token-exchange grant type.
 """
-import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -27,40 +26,8 @@ class TokenExchangeError(Exception):
         self.details = details or {}
 
 
-def _resolve_client_secret(
-    client_secret: str,
-    secret_arn: Optional[str] = None,
-) -> str:
-    """
-    Resolve the client secret, optionally fetching from AWS Secrets Manager.
-
-    If secret_arn is provided, fetches the secret from AWS Secrets Manager.
-    The secret value should be a JSON object with an 'AUTH0_CLIENT_SECRET' key,
-    or a plain string.
-    """
-    if not secret_arn:
-        return client_secret
-
-    try:
-        import boto3
-        sm = boto3.client("secretsmanager")
-        resp = sm.get_secret_value(SecretId=secret_arn)
-        secret_str = resp["SecretString"]
-        try:
-            parsed = json.loads(secret_str)
-            return parsed.get("AUTH0_CLIENT_SECRET", secret_str)
-        except (json.JSONDecodeError, TypeError):
-            return secret_str
-    except Exception as e:
-        logger.warning(
-            "Failed to fetch secret from AWS Secrets Manager (%s), "
-            "falling back to env var: %s", secret_arn, e,
-        )
-        return client_secret
-
-
-class Auth0XAAClient:
-    """Handles Auth0 token exchange for cross-domain access."""
+class OktaXAAClient:
+    """Handles Okta token exchange for cross-domain access."""
 
     TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
     CLIENT_CREDENTIALS_GRANT = "client_credentials"
@@ -72,12 +39,15 @@ class Auth0XAAClient:
         domain: str,
         client_id: str,
         client_secret: str,
-        secret_arn: Optional[str] = None,
+        auth_server_id: str = "default",
     ):
         self.domain = domain
         self.client_id = client_id
-        self.client_secret = _resolve_client_secret(client_secret, secret_arn)
-        self.token_endpoint = f"https://{domain}/oauth/token"
+        self.client_secret = client_secret
+        self.auth_server_id = auth_server_id
+        self.token_endpoint = (
+            f"https://{domain}/oauth2/{auth_server_id}/v1/token"
+        )
 
     async def exchange_token(
         self,
@@ -87,15 +57,15 @@ class Auth0XAAClient:
         actor_token: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Perform cross-domain token exchange via Auth0.
+        Perform cross-domain token exchange via Okta.
 
-        Attempts RFC 8693 token exchange first. If the Auth0 tenant
-        returns an unsupported_grant_type error, falls back to
+        Attempts RFC 8693 token exchange first. If the Okta authorization
+        server returns an unsupported_grant_type error, falls back to
         client_credentials with the badge JWT passed as context.
 
         Parameters:
             subject_token: The AGNTCY badge JWT (subject of the exchange)
-            target_audience: Auth0 API identifier for the target domain
+            target_audience: Okta API identifier for the target domain
             scopes: Requested scopes at the target domain
             actor_token: Optional actor token for delegation chain
 
@@ -159,18 +129,16 @@ class Auth0XAAClient:
         """
         Fallback: use client_credentials grant with badge as custom context.
 
-        Auth0 client_credentials flow issues a token for a registered API
-        (audience). The badge JWT is not sent to Auth0 in this flow but is
+        Okta client_credentials flow issues a token for a registered API
+        (audience). The badge JWT is not sent to Okta in this flow but is
         retained locally for TBAC enforcement by the middleware.
         """
         payload = {
             "grant_type": self.CLIENT_CREDENTIALS_GRANT,
             "client_id": self.client_id,
             "client_secret": self.client_secret,
-            "audience": target_audience,
+            "scope": " ".join(scopes) if scopes else "",
         }
-        if scopes:
-            payload["scope"] = " ".join(scopes)
 
         logger.info(
             "Client credentials fallback: audience=%s scopes=%s",
@@ -183,7 +151,7 @@ class Auth0XAAClient:
         return result
 
     async def _post_token(self, payload: Dict[str, str]) -> Dict[str, Any]:
-        """POST to Auth0 token endpoint and return the parsed response."""
+        """POST to Okta token endpoint and return the parsed response."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 self.token_endpoint,
@@ -199,7 +167,7 @@ class Auth0XAAClient:
             except Exception:
                 pass
             raise TokenExchangeError(
-                reason=f"Auth0 token request failed: {resp.status_code}",
+                reason=f"Okta token request failed: {resp.status_code}",
                 status_code=resp.status_code,
                 details=error_body,
             )

@@ -24,14 +24,14 @@
 └─────────┼───────────────────┼───────────────────────┼──────────────┘
           │                   │                       │
           ▼                   ▼                       ▼
-┌──────────────┐   ┌──────────────┐        ┌──────────────┐
-│  Salesforce  │   │Google Calendar│        │    Slack     │
-│  MCP Server  │   │  MCP Server  │        │  MCP Server  │
-│              │   │              │        │              │
-│ Domain:      │   │ Domain:      │        │ Domain:      │
-│ salesforce   │   │ googleapis   │        │ slack.com    │
-│ .com         │   │ .com         │        │              │
-└──────────────┘   └──────────────┘        └──────────────┘
+┌──────────────┐                             ┌──────────────┐
+│   Weather    │                             │    Slack     │
+│  (Open-Meteo)│                             │  MCP Server  │
+│              │                             │              │
+│ Domain:      │                             │ Domain:      │
+│ api.open-    │                             │ slack.com    │
+│ meteo.com    │                             │              │
+└──────────────┘                             └──────────────┘
 ```
 
 ## Layers
@@ -43,7 +43,7 @@
 
 ### 2. Okta XAA Token Exchange (RFC 8693)
 - Agent exchanges its badge JWT for domain-specific access tokens
-- Each target domain (Salesforce, Google, Slack) receives a scoped token
+- Each target domain (Open-Meteo, Slack) receives a scoped token
 - Implements OAuth 2.0 Token Exchange (`urn:ietf:params:oauth:grant-type:token-exchange`)
 
 ### 3. TBAC Middleware (IdentityServiceMCPMiddleware)
@@ -66,9 +66,8 @@
 │   └── okta_xaa.py           # Okta XAA token exchange
 ├── middleware/                # TBAC enforcement
 │   └── agntcy_tbac.py        # IdentityServiceMCPMiddleware
-├── mcp_servers/               # MCP server stubs
-│   ├── salesforce_mcp.py
-│   ├── gcal_mcp.py
+├── mcp_servers/               # MCP server clients
+│   ├── weather_mcp.py
 │   └── slack_mcp.py
 ├── tests/                    # Test suite
 ├── docker-compose.yml
@@ -126,7 +125,7 @@ docker-compose run openclaw-agent pytest tests/ -v
 
 1. **Sarah** delegates a task to the OpenClaw agent
 2. **Agent** requests an identity badge from AGNTCY Identity Service
-3. For each MCP server (Salesforce, GCal, Slack):
+3. For each MCP server (Weather, Slack):
    - **Agent** exchanges badge JWT for domain-specific token via Okta XAA
    - **TBAC middleware** validates badge + scopes before the call proceeds
    - **MCP server** receives the scoped token and executes the tool call
@@ -137,9 +136,8 @@ docker-compose run openclaw-agent pytest tests/ -v
 ```
 Sarah (human)
   └─▶ OpenClaw Agent [badge: badge-openclaw-agent-001]
-        ├─▶ Salesforce MCP [xaa-token: salesforce.com, scopes: contacts.read]
-        ├─▶ GCal MCP [xaa-token: googleapis.com, scopes: calendar.events.read]
-        └─▶ Slack MCP [xaa-token: slack.com, scopes: chat.write]
+        ├─▶ Weather MCP [xaa-token: api.open-meteo.com, scopes: weather:read]
+        └─▶ Slack MCP [xaa-token: slack.com, scopes: slack:chat:write]
 ```
 
 ## License
