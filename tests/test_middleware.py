@@ -24,20 +24,20 @@ def _make_xaa_token():
 async def test_enforce_allows_valid_request(middleware):
     await middleware.enforce(
         badge=_make_badge(),
-        target_server="salesforce",
-        requested_scopes=["contacts.read"],
+        target_server="weather",
+        requested_scopes=["weather:read"],
         xaa_token=_make_xaa_token(),
     )
 
 
 @pytest.mark.asyncio
 async def test_enforce_blocks_scope_escalation(middleware):
-    badge = _make_badge(scopes=["contacts.read"])
+    badge = _make_badge(scopes=["weather:read"])
     with pytest.raises(TBACViolation, match="Scope escalation"):
         await middleware.enforce(
             badge=badge,
-            target_server="salesforce",
-            requested_scopes=["contacts.read", "contacts.delete"],
+            target_server="weather",
+            requested_scopes=["weather:read", "weather:admin"],
             xaa_token=_make_xaa_token(),
         )
 
@@ -47,7 +47,7 @@ async def test_enforce_blocks_missing_token(middleware):
     with pytest.raises(TBACViolation, match="Missing XAA"):
         await middleware.enforce(
             badge=_make_badge(),
-            target_server="salesforce",
-            requested_scopes=["contacts.read"],
+            target_server="weather",
+            requested_scopes=["weather:read"],
             xaa_token={},
         )

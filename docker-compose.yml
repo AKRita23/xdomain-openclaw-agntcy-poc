@@ -15,8 +15,7 @@ services:
     command: ["echo", "TODO: mount agntcy/identity backend here"]
 
   # --- OpenClaw Agent ---
-  # Connects to official Salesforce, Google, and Slack MCP servers
-  # (no local MCP server containers needed)
+  # Connects to Open-Meteo (public API) and Slack MCP server
   openclaw-agent:
     build: .
     depends_on:

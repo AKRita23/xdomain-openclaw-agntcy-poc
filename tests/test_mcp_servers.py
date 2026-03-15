@@ -1,33 +1,26 @@
-"""Tests for MCP server clients (stub mode — no live MCP servers needed)."""
+"""Tests for MCP server clients (stub mode -- no live MCP servers needed)."""
 import pytest
 from agent.config import MCPServerConfig
 from mcp_servers.base import BaseMCPClient
-from mcp_servers.salesforce_mcp import SalesforceMCPClient
-from mcp_servers.gcal_mcp import GCalMCPClient
+from mcp_servers.weather_mcp import WeatherMCPClient
 from mcp_servers.slack_mcp import SlackMCPClient
 
 
 @pytest.fixture
-def sf_config():
-    return MCPServerConfig(name="salesforce", url="",
-                           auth_domain="salesforce.com", scopes=["contacts.read"])
-
-
-@pytest.fixture
-def gcal_config():
-    return MCPServerConfig(name="gcal", url="",
-                           auth_domain="googleapis.com", scopes=["calendar.events.read"])
+def weather_config():
+    return MCPServerConfig(name="weather", url="",
+                           auth_domain="api.open-meteo.com", scopes=["weather:read"])
 
 
 @pytest.fixture
 def slack_config():
     return MCPServerConfig(name="slack", url="",
-                           auth_domain="slack.com", scopes=["chat.write"])
+                           auth_domain="slack.com", scopes=["slack:chat:write"])
 
 
 @pytest.fixture
 def live_config():
-    """Config with a URL set — simulates live mode (won't actually connect)."""
+    """Config with a URL set -- simulates live mode (won't actually connect)."""
     return MCPServerConfig(name="test", url="https://example.com/mcp",
                            auth_domain="example.com", scopes=["test.read"])
 
@@ -35,20 +28,11 @@ def live_config():
 # --- Stub mode tests (no MCP server URL configured) ---
 
 @pytest.mark.asyncio
-async def test_salesforce_stub_mode(sf_config):
-    client = SalesforceMCPClient(sf_config)
+async def test_weather_stub_mode(weather_config):
+    client = WeatherMCPClient(weather_config)
     assert not client.is_live
     result = await client.call(token="test-token")
-    assert result["tool"] == "salesforce_list_contacts"
-    assert result["_stub"] is True
-
-
-@pytest.mark.asyncio
-async def test_gcal_stub_mode(gcal_config):
-    client = GCalMCPClient(gcal_config)
-    assert not client.is_live
-    result = await client.call(token="test-token")
-    assert result["tool"] == "google_calendar_list_events"
+    assert result["tool"] == "get_current_weather"
     assert result["_stub"] is True
 
 
@@ -64,17 +48,21 @@ async def test_slack_stub_mode(slack_config):
 # --- Named method tests ---
 
 @pytest.mark.asyncio
-async def test_salesforce_list_contacts(sf_config):
-    client = SalesforceMCPClient(sf_config)
-    result = await client.list_contacts(token="test-token", query="Acme")
-    assert result["tool"] == "salesforce_list_contacts"
+async def test_weather_get_current(weather_config):
+    client = WeatherMCPClient(weather_config)
+    result = await client.get_current_weather(token="test-token",
+                                               latitude=30.2672, longitude=-97.7431)
+    assert result["tool"] == "get_current_weather"
+    assert result["result"]["location"] == "Austin, TX"
 
 
 @pytest.mark.asyncio
-async def test_gcal_list_events(gcal_config):
-    client = GCalMCPClient(gcal_config)
-    result = await client.list_events(token="test-token", date="2026-03-12")
-    assert result["tool"] == "google_calendar_list_events"
+async def test_weather_get_forecast(weather_config):
+    client = WeatherMCPClient(weather_config)
+    result = await client.get_forecast(token="test-token",
+                                        latitude=30.2672, longitude=-97.7431, days=3)
+    assert result["tool"] == "get_forecast"
+    assert len(result["result"]["forecast"]) == 3
 
 
 @pytest.mark.asyncio
@@ -87,8 +75,8 @@ async def test_slack_post_message(slack_config):
 
 # --- Base client tests ---
 
-def test_is_live_false_when_empty_url(sf_config):
-    client = BaseMCPClient(sf_config)
+def test_is_live_false_when_empty_url(weather_config):
+    client = BaseMCPClient(weather_config)
     assert not client.is_live
 
 
@@ -98,8 +86,8 @@ def test_is_live_true_when_url_set(live_config):
 
 
 @pytest.mark.asyncio
-async def test_stub_list_tools(sf_config):
-    client = BaseMCPClient(sf_config)
+async def test_stub_list_tools(weather_config):
+    client = BaseMCPClient(weather_config)
     tools = await client.list_tools(token="test-token")
     assert len(tools) == 1
     assert tools[0]["name"] == "stub_tool"

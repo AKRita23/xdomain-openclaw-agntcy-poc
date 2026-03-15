@@ -1,10 +1,10 @@
 """
 OpenClaw Cross-Domain Agent — Version A (AGNTCY Identity Service TBAC).
 
-Orchestrates task execution across Salesforce, Google Calendar, and Slack
-MCP servers on behalf of a delegating user (Sarah), using:
+Orchestrates task execution across Weather and Slack MCP servers on behalf
+of a delegating user (Sarah), using:
   - AGNTCY Identity badges for agent identity attestation
-  - Auth0 XAA (RFC 8693) for cross-domain token exchange
+  - Okta XAA (ID-JAG) for cross-domain token exchange
   - IdentityServiceMCPMiddleware for TBAC enforcement
 """
 import asyncio
@@ -15,10 +15,9 @@ from agent.config import AgentConfig
 from agent.task_context import TaskContext
 from identity.badge_issuer import BadgeIssuer
 from identity.badge_verifier import BadgeVerifier
-from identity.okta_xaa import Auth0XAAClient
+from identity.okta_xaa import OktaXAAClient
 from middleware.agntcy_tbac import IdentityServiceMCPMiddleware
-from mcp_servers.salesforce_mcp import SalesforceMCPClient
-from mcp_servers.gcal_mcp import GCalMCPClient
+from mcp_servers.weather_mcp import WeatherMCPClient
 from mcp_servers.slack_mcp import SlackMCPClient
 
 logger = logging.getLogger(__name__)
@@ -32,7 +31,7 @@ class OpenClawAgent:
       1. Receive task from delegating user
       2. Obtain AGNTCY identity badge
       3. For each target MCP server:
-         a. Exchange token via Auth0 XAA (RFC 8693)
+         a. Exchange token via Okta XAA (ID-JAG)
          b. TBAC middleware validates badge + scopes
          c. Execute MCP tool call
       4. Aggregate results and return to user
@@ -42,18 +41,20 @@ class OpenClawAgent:
         self.config = config or AgentConfig()
         self.badge_issuer = BadgeIssuer(self.config.identity_service_url)
         self.badge_verifier = BadgeVerifier(self.config.identity_service_url)
-        self.xaa_client = Auth0XAAClient(
-            domain=self.config.auth0_domain,
-            client_id=self.config.auth0_client_id,
-            client_secret=self.config.auth0_client_secret,
-            secret_arn=self.config.auth0_secret_arn,
+        self.xaa_client = OktaXAAClient(
+            domain=self.config.okta_domain,
+            client_id=self.config.okta_client_id,
+            client_secret=self.config.okta_client_secret,
+            auth_server_id=self.config.okta_auth_server_id,
+            audience=self.config.okta_audience,
+            token_endpoint=self.config.okta_token_endpoint,
+            issuer=self.config.okta_issuer,
         )
         self.middleware = IdentityServiceMCPMiddleware(
             identity_service_url=self.config.identity_service_url,
         )
         self.mcp_clients: Dict[str, Any] = {
-            "salesforce": SalesforceMCPClient(self.config.mcp_servers["salesforce"]),
-            "gcal": GCalMCPClient(self.config.mcp_servers["gcal"]),
+            "weather": WeatherMCPClient(self.config.mcp_servers["weather"]),
             "slack": SlackMCPClient(self.config.mcp_servers["slack"]),
         }
 
@@ -107,11 +108,12 @@ class OpenClawAgent:
         scopes: List[str],
     ) -> Any:
         """Call a single MCP server with full identity chain."""
-        # Token exchange via Auth0 XAA
+        # Token exchange via Okta XAA (ID-JAG)
         xaa_token = await self.xaa_client.exchange_token(
             subject_token=ctx.identity_badge.get("jwt", ""),
             target_audience=auth_domain,
             scopes=scopes,
+            badge_jwt=ctx.identity_badge.get("jwt", ""),
         )
         ctx.add_delegation(
             delegator=self.config.agent_id,
@@ -137,7 +139,7 @@ async def main():
     """Demo entry point."""
     agent = OpenClawAgent()
     result = await agent.execute_task(
-        "Look up Sarah's Salesforce contacts, check her calendar for tomorrow, "
+        "Check the weather in Austin, TX for Sarah's customer meeting "
         "and post a summary to #team-updates on Slack."
     )
     print("Task result:", result)

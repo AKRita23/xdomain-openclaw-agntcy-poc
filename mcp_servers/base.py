@@ -2,8 +2,7 @@
 Base MCP Client.
 
 Provides the shared MCP protocol client logic for connecting to
-official first-party MCP servers (Salesforce, Google, Slack) via
-the MCP Python SDK.
+MCP servers (Weather, Slack) via the MCP Python SDK.
 
 Supports SSE (HTTP+Server-Sent Events) transport for remote servers.
 """
@@ -29,7 +28,7 @@ class BaseMCPClient:
 
     Connects to an official MCP server using the MCP Python SDK's
     SSE client transport. Each subclass targets a specific provider's
-    MCP server (Salesforce, Google Calendar, Slack).
+    MCP server (Weather, Slack).
 
     In local dev / test mode (when url is empty), returns placeholder
     responses so the agent can run end-to-end without live MCP servers.

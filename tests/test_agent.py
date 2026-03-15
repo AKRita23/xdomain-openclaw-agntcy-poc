@@ -11,9 +11,9 @@ def agent():
     config = AgentConfig(
         agent_id="test-agent-001",
         identity_service_url="http://localhost:8080",
-        auth0_domain="dev-test.us.auth0.com",
-        auth0_client_id="test-client-id",
-        auth0_client_secret="test-client-secret",
+        okta_domain="dev-test.us.okta.com",
+        okta_client_id="test-client-id",
+        okta_client_secret="test-client-secret",
         delegating_user="sarah@example.com",
     )
     return OpenClawAgent(config)
@@ -26,7 +26,7 @@ async def test_execute_task(agent):
         "access_token": "test-access-token-placeholder",
         "token_type": "Bearer",
         "expires_in": 3600,
-        "scope": "contacts.read",
+        "scope": "weather:read",
     }
     with patch.object(agent.xaa_client, "exchange_token",
                       new_callable=AsyncMock, return_value=mock_response):
@@ -34,7 +34,7 @@ async def test_execute_task(agent):
     assert "task_id" in result
     assert "delegation_chain" in result
     assert "results" in result
-    assert set(result["results"].keys()) == {"salesforce", "gcal", "slack"}
+    assert set(result["results"].keys()) == {"weather", "slack"}
 
 
 def test_task_context_delegation():
@@ -45,10 +45,10 @@ def test_task_context_delegation():
     )
     ctx.add_delegation(
         delegator="test-agent",
-        delegatee="salesforce",
-        auth_domain="salesforce.com",
-        scopes=["contacts.read"],
+        delegatee="weather",
+        auth_domain="api.open-meteo.com",
+        scopes=["weather:read"],
     )
     chain = ctx.get_chain_summary()
     assert len(chain) == 1
-    assert chain[0]["domain"] == "salesforce.com"
+    assert chain[0]["domain"] == "api.open-meteo.com"
