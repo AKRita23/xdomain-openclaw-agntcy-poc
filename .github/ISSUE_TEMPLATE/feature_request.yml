@@ -1,0 +1,90 @@
+name: Feature Request
+description: Propose a new feature with security considerations
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: input
+    id: title
+    attributes:
+      label: Feature Title
+      description: A concise title for the feature
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: What conditions must be met for this feature to be considered complete?
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: security_considerations
+    attributes:
+      label: Security Considerations
+      description: What security implications does this feature have?
+      placeholder: |
+        - Authentication/authorization changes
+        - New data flows
+        - New external dependencies
+    validations:
+      required: true
+
+  - type: dropdown
+    id: trust_boundaries_affected
+    attributes:
+      label: Trust Boundaries Affected
+      description: Which trust boundaries does this feature cross or modify?
+      multiple: true
+      options:
+        - agent
+        - okta-xaa
+        - agntcy-badge
+        - mcp-server
+        - cedar-policy
+        - secrets-manager
+    validations:
+      required: true
+
+  - type: textarea
+    id: input_output_contracts
+    attributes:
+      label: Input/Output Contracts
+      description: Define the expected inputs, outputs, and data formats
+      placeholder: |
+        Input: ...
+        Output: ...
+        Error cases: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: testability_criteria
+    attributes:
+      label: Testability Criteria
+      description: How will this feature be tested?
+      placeholder: |
+        - Unit tests: ...
+        - Integration tests: ...
+        - Security tests: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: threat_surface
+    attributes:
+      label: Threat Surface
+      description: >
+        Describe the threat surface this feature introduces or modifies.
+        This field is REQUIRED — submission will be blocked if empty.
+      placeholder: |
+        - Attack vectors introduced
+        - Data exposure risks
+        - Privilege escalation paths
+        - Injection surfaces
+    validations:
+      required: true
