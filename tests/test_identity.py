@@ -1,5 +1,6 @@
 """Tests for identity badge issuance, verification, and Okta XAA (ID-JAG)."""
 import pytest
+import jwt as pyjwt
 from unittest.mock import AsyncMock, patch, MagicMock
 from identity.badge_issuer import BadgeIssuer
 from identity.badge_verifier import BadgeVerifier
@@ -40,22 +41,121 @@ async def test_issue_badge(issuer):
 
 @pytest.mark.asyncio
 async def test_verify_valid_badge(verifier):
-    badge = {
-        "badge_id": "badge-test",
-        "jwt": "eyJ.test.token",
-    }
-    result = await verifier.verify_badge(badge)
+    """Valid badge with mocked JWKS verification."""
+    mock_key = MagicMock()
+    mock_key.key = "test-public-key"
+    mock_jwks = MagicMock()
+    mock_jwks.get_signing_key_from_jwt.return_value = mock_key
+
+    with patch.object(verifier, "_get_jwks_client", return_value=mock_jwks), \
+         patch("identity.badge_verifier.jwt.decode") as mock_decode:
+        mock_decode.return_value = {
+            "sub": "agent-001",
+            "iss": "did:web:example.com:issuer",
+            "exp": 9999999999,
+        }
+        badge = {"badge_id": "badge-test", "jwt": "eyJ.test.token"}
+        result = await verifier.verify_badge(badge)
+
     assert result["valid"] is True
+    assert result["badge_id"] == "badge-test"
+    assert "claims" in result
 
 
 @pytest.mark.asyncio
-async def test_verify_invalid_badge(verifier):
+async def test_verify_invalid_badge_missing_fields(verifier):
     result = await verifier.verify_badge({})
     assert result["valid"] is False
+    assert "Missing" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_verify_expired_badge(verifier):
+    """Expired badge JWT is rejected."""
+    mock_key = MagicMock()
+    mock_key.key = "test-public-key"
+    mock_jwks = MagicMock()
+    mock_jwks.get_signing_key_from_jwt.return_value = mock_key
+
+    with patch.object(verifier, "_get_jwks_client", return_value=mock_jwks), \
+         patch("identity.badge_verifier.jwt.decode") as mock_decode:
+        mock_decode.side_effect = pyjwt.ExpiredSignatureError("expired")
+        badge = {"badge_id": "badge-test", "jwt": "eyJ.expired.token"}
+        result = await verifier.verify_badge(badge)
+
+    assert result["valid"] is False
+    assert "expired" in result["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_verify_bad_signature_badge(verifier):
+    """Badge with invalid signature is rejected."""
+    mock_key = MagicMock()
+    mock_key.key = "test-public-key"
+    mock_jwks = MagicMock()
+    mock_jwks.get_signing_key_from_jwt.return_value = mock_key
+
+    with patch.object(verifier, "_get_jwks_client", return_value=mock_jwks), \
+         patch("identity.badge_verifier.jwt.decode") as mock_decode:
+        mock_decode.side_effect = pyjwt.InvalidSignatureError("bad sig")
+        badge = {"badge_id": "badge-test", "jwt": "eyJ.badsig.token"}
+        result = await verifier.verify_badge(badge)
+
+    assert result["valid"] is False
+    assert "signature" in result["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_verify_jwks_unavailable(verifier):
+    """When JWKS endpoint is unreachable, badge is rejected."""
+    with patch.object(verifier, "_get_jwks_client") as mock_get:
+        mock_jwks = MagicMock()
+        mock_jwks.get_signing_key_from_jwt.side_effect = pyjwt.PyJWKClientError("unreachable")
+        mock_get.return_value = mock_jwks
+        badge = {"badge_id": "badge-test", "jwt": "eyJ.test.token"}
+        result = await verifier.verify_badge(badge)
+
+    assert result["valid"] is False
+    assert "JWKS" in result["reason"]
 
 
 def test_okta_client_token_endpoint(xaa_client):
     assert xaa_client.token_endpoint == "https://dev-test.okta.com/oauth2/default/v1/token"
+
+
+def test_validate_token_response_rejects_missing_access_token():
+    """Token response without access_token is rejected."""
+    with pytest.raises(TokenExchangeError, match="missing access_token"):
+        OktaXAAClient._validate_token_response(
+            {"token_type": "Bearer", "expires_in": 3600},
+            "api.open-meteo.com",
+        )
+
+
+def test_validate_token_response_rejects_zero_expiry():
+    """Token response with zero expires_in is rejected."""
+    with pytest.raises(TokenExchangeError, match="expires_in"):
+        OktaXAAClient._validate_token_response(
+            {"access_token": "tok", "token_type": "Bearer", "expires_in": 0},
+            "api.open-meteo.com",
+        )
+
+
+def test_validate_token_response_rejects_negative_expiry():
+    """Token response with negative expires_in is rejected."""
+    with pytest.raises(TokenExchangeError, match="expires_in"):
+        OktaXAAClient._validate_token_response(
+            {"access_token": "tok", "token_type": "Bearer", "expires_in": -1},
+            "api.open-meteo.com",
+        )
+
+
+def test_validate_token_response_accepts_opaque_token():
+    """Opaque (non-JWT) tokens pass validation when expiry is valid."""
+    OktaXAAClient._validate_token_response(
+        {"access_token": "opaque-token-value", "token_type": "Bearer", "expires_in": 3600},
+        "api.open-meteo.com",
+    )
 
 
 @pytest.mark.asyncio
@@ -77,7 +177,8 @@ async def test_okta_id_jag_exchange_success(xaa_client):
         "expires_in": 3600,
     }
 
-    with patch("identity.okta_xaa.httpx.AsyncClient") as mock_client_cls:
+    with patch("identity.okta_xaa.httpx.AsyncClient") as mock_client_cls, \
+         patch.object(OktaXAAClient, "_validate_token_response"):
         mock_client = AsyncMock()
         mock_client.post.side_effect = [id_jag_response, token_response]
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
