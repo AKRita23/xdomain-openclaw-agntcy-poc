@@ -1,6 +1,5 @@
 """Tests for identity badge issuance, verification, and Okta XAA (ID-JAG)."""
 import pytest
-import jwt as pyjwt
 from unittest.mock import AsyncMock, patch, MagicMock
 from identity.badge_issuer import BadgeIssuer
 from identity.badge_verifier import BadgeVerifier
@@ -41,25 +40,35 @@ async def test_issue_badge(issuer):
 
 @pytest.mark.asyncio
 async def test_verify_valid_badge(verifier):
-    """Valid badge with mocked JWKS verification."""
-    mock_key = MagicMock()
-    mock_key.key = "test-public-key"
-    mock_jwks = MagicMock()
-    mock_jwks.get_signing_key_from_jwt.return_value = mock_key
+    """Valid badge verified via Identity Node REST API."""
+    verify_resp = MagicMock()
+    verify_resp.status_code = 200
+    verify_resp.json.return_value = {
+        "status": True,
+        "document": {
+            "issuer": "did:web:example.com:issuer",
+            "issuanceDate": "2026-01-01T00:00:00Z",
+            "content": {
+                "id": "badge-test",
+                "badge": '{"capabilities": ["weather:read"], "delegating_user": "sarah@example.com"}',
+            },
+        },
+        "errors": [],
+    }
 
-    with patch.object(verifier, "_get_jwks_client", return_value=mock_jwks), \
-         patch("identity.badge_verifier.jwt.decode") as mock_decode:
-        mock_decode.return_value = {
-            "sub": "agent-001",
-            "iss": "did:web:example.com:issuer",
-            "exp": 9999999999,
-        }
+    with patch("identity.badge_verifier.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.post.return_value = verify_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
         badge = {"badge_id": "badge-test", "jwt": "eyJ.test.token"}
         result = await verifier.verify_badge(badge)
 
     assert result["valid"] is True
     assert result["badge_id"] == "badge-test"
-    assert "claims" in result
+    assert result["capabilities"] == ["weather:read"]
 
 
 @pytest.mark.asyncio
@@ -71,15 +80,22 @@ async def test_verify_invalid_badge_missing_fields(verifier):
 
 @pytest.mark.asyncio
 async def test_verify_expired_badge(verifier):
-    """Expired badge JWT is rejected."""
-    mock_key = MagicMock()
-    mock_key.key = "test-public-key"
-    mock_jwks = MagicMock()
-    mock_jwks.get_signing_key_from_jwt.return_value = mock_key
+    """Expired badge JWT is rejected by Identity Node."""
+    verify_resp = MagicMock()
+    verify_resp.status_code = 200
+    verify_resp.json.return_value = {
+        "status": False,
+        "document": {},
+        "errors": ["credential has expired"],
+    }
 
-    with patch.object(verifier, "_get_jwks_client", return_value=mock_jwks), \
-         patch("identity.badge_verifier.jwt.decode") as mock_decode:
-        mock_decode.side_effect = pyjwt.ExpiredSignatureError("expired")
+    with patch("identity.badge_verifier.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.post.return_value = verify_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
         badge = {"badge_id": "badge-test", "jwt": "eyJ.expired.token"}
         result = await verifier.verify_badge(badge)
 
@@ -89,15 +105,22 @@ async def test_verify_expired_badge(verifier):
 
 @pytest.mark.asyncio
 async def test_verify_bad_signature_badge(verifier):
-    """Badge with invalid signature is rejected."""
-    mock_key = MagicMock()
-    mock_key.key = "test-public-key"
-    mock_jwks = MagicMock()
-    mock_jwks.get_signing_key_from_jwt.return_value = mock_key
+    """Badge with invalid signature is rejected by Identity Node."""
+    verify_resp = MagicMock()
+    verify_resp.status_code = 200
+    verify_resp.json.return_value = {
+        "status": False,
+        "document": {},
+        "errors": ["invalid signature on credential"],
+    }
 
-    with patch.object(verifier, "_get_jwks_client", return_value=mock_jwks), \
-         patch("identity.badge_verifier.jwt.decode") as mock_decode:
-        mock_decode.side_effect = pyjwt.InvalidSignatureError("bad sig")
+    with patch("identity.badge_verifier.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.post.return_value = verify_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
         badge = {"badge_id": "badge-test", "jwt": "eyJ.badsig.token"}
         result = await verifier.verify_badge(badge)
 
@@ -107,16 +130,21 @@ async def test_verify_bad_signature_badge(verifier):
 
 @pytest.mark.asyncio
 async def test_verify_jwks_unavailable(verifier):
-    """When JWKS endpoint is unreachable, badge is rejected."""
-    with patch.object(verifier, "_get_jwks_client") as mock_get:
-        mock_jwks = MagicMock()
-        mock_jwks.get_signing_key_from_jwt.side_effect = pyjwt.PyJWKClientError("unreachable")
-        mock_get.return_value = mock_jwks
+    """When Identity Node is unreachable, badge is rejected."""
+    import httpx as _httpx
+
+    with patch("identity.badge_verifier.httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = _httpx.ConnectError("Connection refused")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = mock_client
+
         badge = {"badge_id": "badge-test", "jwt": "eyJ.test.token"}
         result = await verifier.verify_badge(badge)
 
     assert result["valid"] is False
-    assert "JWKS" in result["reason"]
+    assert "failed" in result["reason"].lower()
 
 
 def test_okta_client_token_endpoint(xaa_client):
