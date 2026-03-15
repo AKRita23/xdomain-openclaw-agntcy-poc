@@ -8,11 +8,15 @@ Intercepts MCP tool calls and enforces:
   4. Rate / quota limits per badge
 """
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from identity.badge_verifier import BadgeVerifier
 
 logger = logging.getLogger(__name__)
+
+# PoC TTL for badge expiration (24 hours)
+BADGE_TTL_SECONDS = 24 * 60 * 60
 
 
 class TBACViolation(Exception):
@@ -33,8 +37,8 @@ class IdentityServiceMCPMiddleware:
     and the delegating user's granted scopes.
     """
 
-    def __init__(self, identity_service_url: str):
-        self.verifier = BadgeVerifier(identity_service_url)
+    def __init__(self, identity_service_url: str, metadata_id: str = ""):
+        self.verifier = BadgeVerifier(identity_service_url, metadata_id=metadata_id)
 
     async def enforce(
         self,
@@ -72,7 +76,39 @@ class IdentityServiceMCPMiddleware:
                     },
                 )
 
-        # 3. Validate XAA token is present and well-formed
+        # 3. Task context validation
+        task_claim = xaa_token.get("task")
+        if task_claim is not None and task_claim != "weather_slack_notification":
+            raise TBACViolation(
+                reason=f"Task mismatch: expected weather_slack_notification, got {task_claim}",
+                details={"expected": "weather_slack_notification", "actual": task_claim},
+            )
+
+        # 4. Domain validation
+        capabilities = badge.get("capabilities", [])
+        if capabilities:
+            authorized_domains = {cap["domain"] for cap in capabilities if "domain" in cap}
+            if target_server not in authorized_domains:
+                raise TBACViolation(
+                    reason=f"Domain {target_server} not authorized by badge capabilities",
+                    details={
+                        "target_server": target_server,
+                        "authorized_domains": list(authorized_domains),
+                    },
+                )
+
+        # 5. Badge TTL validation
+        issuance_date = badge.get("issuanceDate")
+        if issuance_date:
+            issued_at = datetime.fromisoformat(issuance_date.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - issued_at).total_seconds()
+            if age > BADGE_TTL_SECONDS:
+                raise TBACViolation(
+                    reason="Badge has expired (exceeded 24h TTL)",
+                    details={"issuanceDate": issuance_date, "age_seconds": age},
+                )
+
+        # 6. Validate XAA token is present and well-formed
         if not xaa_token.get("access_token"):
             raise TBACViolation(reason="Missing XAA access token")
 

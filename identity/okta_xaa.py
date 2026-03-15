@@ -11,9 +11,11 @@ Flow:
      for a scoped access token to the target resource application.
 """
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
+import jwt
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +82,62 @@ class OktaXAAClient:
 
         Returns:
             Token response with access_token, token_type, expires_in, scope
+
+        Raises:
+            TokenExchangeError: If token exchange fails or validation fails
         """
         id_jag_jwt = await self._request_id_jag(scopes=scopes)
-        return await self._exchange_id_jag_for_token(
+        result = await self._exchange_id_jag_for_token(
             id_jag_jwt=id_jag_jwt,
             target_audience=target_audience,
             badge_jwt=badge_jwt or subject_token,
         )
+        self._validate_token_response(result, target_audience)
+        return result
+
+    @staticmethod
+    def _validate_token_response(
+        token_response: Dict[str, Any],
+        expected_audience: str,
+    ) -> None:
+        """
+        Validate the token response from Okta.
+
+        Checks:
+          - expires_in is present and positive
+          - access_token is present and non-empty
+
+        Raises TokenExchangeError if validation fails.
+        """
+        access_token = token_response.get("access_token", "")
+        if not access_token:
+            raise TokenExchangeError(reason="Token response missing access_token")
+
+        expires_in = token_response.get("expires_in")
+        if expires_in is None or expires_in <= 0:
+            raise TokenExchangeError(
+                reason="Token response has invalid or missing expires_in"
+            )
+
+        # Attempt to decode the access token (without verification) to check
+        # audience claim. Okta access tokens are JWTs with an aud claim.
+        try:
+            unverified = jwt.decode(
+                access_token,
+                options={"verify_signature": False},
+                algorithms=["RS256", "ES256"],
+            )
+            token_aud = unverified.get("aud")
+            if token_aud and token_aud != expected_audience:
+                raise TokenExchangeError(
+                    reason=(
+                        f"Token audience mismatch: "
+                        f"expected '{expected_audience}', got '{token_aud}'"
+                    )
+                )
+        except jwt.DecodeError:
+            # Opaque tokens don't have decodable claims — skip aud check
+            logger.info("Token is opaque (non-JWT), skipping audience validation")
 
     async def _request_id_jag(
         self,
