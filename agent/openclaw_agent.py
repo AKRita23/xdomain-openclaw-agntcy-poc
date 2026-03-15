@@ -4,7 +4,7 @@ OpenClaw Cross-Domain Agent — Version A (AGNTCY Identity Service TBAC).
 Orchestrates task execution across Weather and Slack MCP servers on behalf
 of a delegating user (Sarah), using:
   - AGNTCY Identity badges for agent identity attestation
-  - Okta XAA (RFC 8693) for cross-domain token exchange
+  - Okta XAA (ID-JAG) for cross-domain token exchange
   - IdentityServiceMCPMiddleware for TBAC enforcement
 """
 import asyncio
@@ -31,7 +31,7 @@ class OpenClawAgent:
       1. Receive task from delegating user
       2. Obtain AGNTCY identity badge
       3. For each target MCP server:
-         a. Exchange token via Okta XAA (RFC 8693)
+         a. Exchange token via Okta XAA (ID-JAG)
          b. TBAC middleware validates badge + scopes
          c. Execute MCP tool call
       4. Aggregate results and return to user
@@ -46,6 +46,9 @@ class OpenClawAgent:
             client_id=self.config.okta_client_id,
             client_secret=self.config.okta_client_secret,
             auth_server_id=self.config.okta_auth_server_id,
+            audience=self.config.okta_audience,
+            token_endpoint=self.config.okta_token_endpoint,
+            issuer=self.config.okta_issuer,
         )
         self.middleware = IdentityServiceMCPMiddleware(
             identity_service_url=self.config.identity_service_url,
@@ -105,11 +108,12 @@ class OpenClawAgent:
         scopes: List[str],
     ) -> Any:
         """Call a single MCP server with full identity chain."""
-        # Token exchange via Okta XAA
+        # Token exchange via Okta XAA (ID-JAG)
         xaa_token = await self.xaa_client.exchange_token(
             subject_token=ctx.identity_badge.get("jwt", ""),
             target_audience=auth_domain,
             scopes=scopes,
+            badge_jwt=ctx.identity_badge.get("jwt", ""),
         )
         ctx.add_delegation(
             delegator=self.config.agent_id,

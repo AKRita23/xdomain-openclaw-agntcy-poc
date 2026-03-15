@@ -24,11 +24,22 @@ class AgentConfig:
     identity_service_url: str = os.getenv("AGNTCY_IDENTITY_SERVICE_URL", "http://localhost:8080")
     issuer_did: str = os.getenv("AGNTCY_ISSUER_DID", "")
 
-    # Okta (RFC 8693 token exchange)
+    # AGNTCY Badge (well-known endpoint)
+    agntcy_badge_well_known: str = os.getenv("AGNTCY_BADGE_WELL_KNOWN", "")
+    agntcy_badge_id: str = os.getenv("AGNTCY_BADGE_ID", "")
+    agntcy_metadata_id: str = os.getenv("AGNTCY_METADATA_ID", "")
+
+    # Okta XAA (ID-JAG)
     okta_domain: str = os.getenv("OKTA_DOMAIN", "")
     okta_client_id: str = os.getenv("OKTA_CLIENT_ID", "")
     okta_client_secret: str = os.getenv("OKTA_CLIENT_SECRET", "")
+    okta_audience: str = os.getenv("OKTA_AUDIENCE", "")
     okta_auth_server_id: str = os.getenv("OKTA_AUTH_SERVER_ID", "default")
+    okta_token_endpoint: str = os.getenv("OKTA_TOKEN_ENDPOINT", "")
+    okta_issuer: str = os.getenv("OKTA_ISSUER", "")
+
+    # AWS (for Secrets Manager)
+    aws_secrets_region: str = os.getenv("AWS_REGION", "us-east-1")
 
     # Delegating user
     delegating_user: str = os.getenv("DELEGATING_USER", "sarah@example.com")
