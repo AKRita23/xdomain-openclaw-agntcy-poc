@@ -33,7 +33,29 @@
 │ meteo.com    │                             │              │
 └──────────────┘                             └──────────────┘
 ```
+## End to End Flow 
 
+1. Sarah delegates task to OpenClaw agent
+2. Agent fetches AGNTCY badge from identity node
+   GET http://13.222.140.133:4000/v1alpha1/vc/AGNTCY-ffe62877.../.well-known/vcs.json
+3. Agent verifies badge cryptographically
+   POST http://13.222.140.133:4000/v1alpha1/vc/verify
+   → status: true 
+4. Agent requests ID-JAG from Okta
+   POST https://agntcydev1.oktapreview.com/oauth2/ausd9v0ra5BWoW1y40x7/v1/token
+   → scoped access token for weather:read
+5. TBAC middleware intercepts MCP tool call
+   → verifies badge capabilities match requested scopes
+   → verifies task == "weather_slack_notification"
+   → ALLOW 
+6. Weather MCP calls Open-Meteo API
+   GET https://api.open-meteo.com/v1/forecast?...
+   → returns weather data for Austin, TX
+7. TBAC middleware intercepts Slack MCP call
+   → same checks for slack:chat:write
+   → ALLOW 
+8. Slack MCP posts weather summary to #agent-weather-alerts
+   
 ## Layers
 
 ### 1. AGNTCY Identity Badge
