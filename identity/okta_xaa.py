@@ -8,6 +8,7 @@ at the resource domain (Org 2).
 """
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
@@ -109,13 +110,21 @@ class OktaXAAClient:
         )
 
     def load_sarah_token(self) -> str:
-        """Load Sarah's pre-obtained access token from AWS Secrets Manager.
+        """Load Sarah's pre-obtained access token.
+
+        Checks the SARAH_ACCESS_TOKEN env var first; falls back to
+        AWS Secrets Manager if the env var is not set.
 
         Returns the access_token string.
 
         Raises:
             TokenExchangeError: If the secret cannot be fetched or parsed.
         """
+        env_token = os.getenv("SARAH_ACCESS_TOKEN")
+        if env_token:
+            logger.info("Loaded Sarah's token from SARAH_ACCESS_TOKEN env var")
+            return env_token
+
         try:
             sm = boto3.client("secretsmanager", region_name=self.aws_region)
             resp = sm.get_secret_value(SecretId=self.SARAH_TOKEN_SECRET_ID)

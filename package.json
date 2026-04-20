@@ -1,0 +1,9 @@
+{
+  "name": "xdomain-openclaw-agntcy-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "qs": "^6.13.0"
+  }
+}
