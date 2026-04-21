@@ -1,5 +1,7 @@
 """Tests for identity badge issuance, verification, and Okta XAA (ID-JAG)."""
+import httpx
 import pytest
+import respx
 from unittest.mock import AsyncMock, patch, MagicMock
 from identity.badge_issuer import BadgeIssuer
 from identity.badge_verifier import BadgeVerifier
@@ -27,15 +29,23 @@ def xaa_client():
 
 
 @pytest.mark.asyncio
-async def test_issue_badge(issuer):
-    badge = await issuer.issue_badge(
-        agent_id="test-agent",
-        delegating_user="sarah@example.com",
-        issuer_did="did:example:issuer",
-    )
+async def test_issue_badge(issuer, monkeypatch):
+    well_known = "http://identity.test/v1alpha1/vc/AGNTCY-x/.well-known/vcs.json"
+    monkeypatch.setenv("AGNTCY_BADGE_WELL_KNOWN", well_known)
+    monkeypatch.setenv("AGNTCY_BADGE_ID", "badge-test-001")
+
+    with respx.mock:
+        respx.get(well_known).mock(return_value=httpx.Response(200, json={
+            "vcs": [{"value": "eyJ.fake.jwt"}],
+        }))
+        badge = await issuer.issue_badge(
+            agent_id="test-agent",
+            delegating_user="sarah@example.com",
+            issuer_did="did:example:issuer",
+        )
     assert badge["agent_id"] == "test-agent"
     assert badge["delegating_user"] == "sarah@example.com"
-    assert "jwt" in badge
+    assert badge["jwt"] == "eyJ.fake.jwt"
 
 
 @pytest.mark.asyncio
