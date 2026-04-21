@@ -1,5 +1,7 @@
 """Tests for the OpenClaw agent orchestrator."""
+import httpx
 import pytest
+import respx
 from unittest.mock import AsyncMock, patch
 from agent.openclaw_agent import OpenClawAgent
 from agent.config import AgentConfig
@@ -20,7 +22,7 @@ def agent():
 
 
 @pytest.mark.asyncio
-async def test_execute_task(agent):
+async def test_execute_task(agent, monkeypatch):
     # Mock the Auth0 token exchange to avoid real HTTP calls
     mock_response = {
         "access_token": "test-access-token-placeholder",
@@ -28,8 +30,15 @@ async def test_execute_task(agent):
         "expires_in": 3600,
         "scope": "weather:read",
     }
-    with patch.object(agent.xaa_client, "exchange_token",
-                      new_callable=AsyncMock, return_value=mock_response):
+    well_known = "http://identity.test/v1alpha1/vc/AGNTCY-x/.well-known/vcs.json"
+    monkeypatch.setenv("AGNTCY_BADGE_WELL_KNOWN", well_known)
+    with respx.mock, patch.object(
+        agent.xaa_client, "exchange_token",
+        new_callable=AsyncMock, return_value=mock_response,
+    ):
+        respx.get(well_known).mock(return_value=httpx.Response(200, json={
+            "vcs": [{"value": "eyJ.fake.jwt"}],
+        }))
         result = await agent.execute_task("Test cross-domain task")
     assert "task_id" in result
     assert "delegation_chain" in result
