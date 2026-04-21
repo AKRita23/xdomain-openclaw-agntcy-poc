@@ -5,22 +5,52 @@ Connects to Open-Meteo's public weather API to retrieve current conditions
 and forecasts on behalf of the delegating user using an XAA-exchanged
 access token.
 
+Supports three dispatch modes (see :mod:`mcp_servers.base`):
+  * ``stub`` — canned Austin, TX response for offline demos.
+  * ``mcp``  — SSE-transported MCP server (not currently offered by
+    Open-Meteo; retained for parity).
+  * ``rest`` — direct Open-Meteo REST call. The XAA access token is not
+    forwarded to Open-Meteo (the public API is unauthenticated), but its
+    ``sub`` claim is logged so the XAA → backend handoff is visible in
+    demo logs.
+
 Ref: https://open-meteo.com/en/docs
 """
+import base64
 import json
 import logging
-import urllib.request
 from typing import Any, Dict, Optional
 
-from mcp_servers.base import BaseMCPClient
+import httpx
+
+from mcp_servers.base import BaseMCPClient, MCPToolCallError
 
 logger = logging.getLogger(__name__)
 
 OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1/forecast"
 
 
+def _decode_jwt_sub(token: str) -> str:
+    """Best-effort extraction of the ``sub`` claim from a JWT for logging.
+
+    No signature verification — upstream layers (badge verifier, TBAC) have
+    already authenticated the token by the time a tool call is dispatched.
+    Returns ``"<unknown>"`` on any decode failure so logging never breaks a
+    tool call.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return "<unknown>"
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+        return str(claims.get("sub", "<unknown>"))
+    except Exception:
+        return "<unknown>"
+
+
 class WeatherMCPClient(BaseMCPClient):
-    """Client for Open-Meteo weather API via MCP."""
+    """Client for Open-Meteo weather API via the MCP tool contract."""
 
     DEFAULT_TOOL = "get_current_weather"
 
@@ -62,6 +92,64 @@ class WeatherMCPClient(BaseMCPClient):
             tool="get_forecast",
             arguments={"latitude": latitude, "longitude": longitude, "days": days},
         )
+
+    async def _call_backend(self, token: str, tool_name: str,
+                            arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch a tool call to the Open-Meteo REST API directly.
+
+        The XAA access token is logged (via its ``sub`` claim) to prove the
+        call was authorized by the cross-domain flow, but is not sent to
+        Open-Meteo — the public API has no auth.
+        """
+        sub = _decode_jwt_sub(token)
+        logger.info(
+            "[Weather MCP] XAA-validated tool call: tool=%s sub=%s args=%s",
+            tool_name, sub, arguments,
+        )
+
+        latitude = float(arguments.get("latitude", 30.2672))
+        longitude = float(arguments.get("longitude", -97.7431))
+
+        if tool_name == "get_current_weather":
+            params: Dict[str, Any] = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": "temperature_2m,wind_speed_10m,"
+                           "relative_humidity_2m,weather_code",
+            }
+        elif tool_name == "get_forecast":
+            days = int(arguments.get("days", 3))
+            params = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+                "forecast_days": days,
+            }
+        else:
+            raise MCPToolCallError(
+                f"Unsupported tool for Weather REST backend: {tool_name}"
+            )
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(OPEN_METEO_BASE_URL, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise MCPToolCallError(
+                f"Open-Meteo returned HTTP {exc.response.status_code} for "
+                f"{tool_name}: {exc.response.text[:200]}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise MCPToolCallError(
+                f"Open-Meteo request failed for {tool_name}: {exc}"
+            ) from exc
+
+        logger.info(
+            "[Weather MCP] Open-Meteo responded OK for sub=%s tool=%s",
+            sub, tool_name,
+        )
+        return {"tool": tool_name, "result": data}
 
     def _stub_call(self, tool_name: str,
                    arguments: Dict[str, Any]) -> Dict[str, Any]:

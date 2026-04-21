@@ -6,11 +6,23 @@ from typing import Dict, List, Optional
 
 @dataclass
 class MCPServerConfig:
-    """Configuration for an MCP server connection."""
+    """Configuration for an MCP server connection.
+
+    Dispatch modes (see :class:`mcp_servers.base.BaseMCPClient.mode`):
+      * ``stub``  — no ``url`` and ``rest_mode`` is False (default): returns
+        placeholder data for offline development.
+      * ``mcp``   — ``url`` points at an MCP SSE server; calls use the MCP
+        Python SDK transport.
+      * ``rest``  — ``rest_mode`` is True; calls are dispatched to the
+        subclass's ``_call_backend`` which talks directly to the provider's
+        REST API while preserving the MCP tool/arguments contract.
+    """
     name: str
     url: str
     auth_domain: str
     scopes: List[str] = field(default_factory=list)
+    rest_mode: bool = False
+    slack_bot_token: str = ""
 
 
 @dataclass
@@ -59,6 +71,19 @@ class AgentConfig:
     # Delegating user
     delegating_user: str = os.getenv("DELEGATING_USER", "sarah@example.com")
 
+    # MCP dispatch modes (step 6 of the XAA flow).
+    # When ``*_rest_mode`` is True, the MCP client calls the provider's real
+    # REST API directly (Open-Meteo, Slack Web API) while keeping the MCP
+    # tool/arguments contract. When False and a URL is configured, it uses
+    # the MCP SSE transport. When neither is set, it runs in stub mode.
+    weather_mcp_rest_mode: bool = (
+        os.getenv("WEATHER_MCP_REST_MODE", "true").lower() == "true"
+    )
+    slack_mcp_rest_mode: bool = (
+        os.getenv("SLACK_MCP_REST_MODE", "true").lower() == "true"
+    )
+    slack_bot_token: str = os.getenv("SLACK_BOT_TOKEN", "")
+
     # MCP Server targets
     mcp_servers: Dict[str, MCPServerConfig] = field(default_factory=lambda: {
         "weather": MCPServerConfig(
@@ -66,11 +91,14 @@ class AgentConfig:
             url=os.getenv("WEATHER_MCP_URL", ""),
             auth_domain="api.open-meteo.com",
             scopes=["weather:read"],
+            rest_mode=os.getenv("WEATHER_MCP_REST_MODE", "true").lower() == "true",
         ),
         "slack": MCPServerConfig(
             name="slack",
             url=os.getenv("SLACK_MCP_URL", "http://localhost:9003"),
             auth_domain="slack.com",
             scopes=["slack:chat:write", "slack:channels:read"],
+            rest_mode=os.getenv("SLACK_MCP_REST_MODE", "true").lower() == "true",
+            slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
         ),
     })
