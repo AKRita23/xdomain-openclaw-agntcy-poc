@@ -23,8 +23,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import json
 import logging
+import os
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +41,7 @@ from identity.resource_exchange import (
     ResourceAccessToken,
     exchange_id_jag_for_access_token,
 )
+from identity.xaa_dev_client import XAADevClient, XAADevConfig, XAADevError
 from mcp_servers.weather_mcp import WeatherMCPClient
 from middleware.agntcy_tbac import IdentityServiceMCPMiddleware
 
@@ -86,6 +91,11 @@ class XAAOrchestrator:
     All collaborators are attributes so tests can replace them. The
     module-level :func:`execute_xaa_flow` constructs the default instance
     from :class:`agent.config.AgentConfig`.
+
+    When ``xaa_dev_client`` is set (USE_XAA_DEV=true path), Steps 3 and 4
+    are dispatched through xaa.dev's protocol instead of the Okta + local
+    resource auth server; the ``xaa_client`` + resource-exchange callable
+    are ignored for those two steps.
     """
 
     config: AgentConfig
@@ -96,6 +106,7 @@ class XAAOrchestrator:
     weather_client: WeatherMCPClient
     token_cache: CachedTokenStore = field(default_factory=CachedTokenStore)
     resource_client_id: Optional[str] = None
+    xaa_dev_client: Optional[XAADevClient] = None
 
     @classmethod
     def from_config(
@@ -104,6 +115,21 @@ class XAAOrchestrator:
         token_cache: Optional[CachedTokenStore] = None,
     ) -> "XAAOrchestrator":
         cfg = config or AgentConfig()
+        xaa_dev_client: Optional[XAADevClient] = None
+        if cfg.use_xaa_dev:
+            xaa_dev_client = XAADevClient(
+                XAADevConfig(
+                    idp_url=cfg.xaa_idp_url,
+                    auth_server_url=cfg.xaa_auth_server_url,
+                    client_id=cfg.xaa_client_id,
+                    client_secret=cfg.xaa_client_secret,
+                    resource_client_id=cfg.xaa_resource_client_id,
+                    resource_client_secret=cfg.xaa_resource_client_secret,
+                    redirect_uri=cfg.xaa_redirect_uri,
+                    resource_audience=cfg.xaa_resource_audience,
+                    scope=cfg.xaa_scope,
+                )
+            )
         return cls(
             config=cfg,
             badge_issuer=BadgeIssuer(cfg.identity_service_url),
@@ -133,6 +159,7 @@ class XAAOrchestrator:
             ),
             weather_client=WeatherMCPClient(cfg.mcp_servers["weather"]),
             token_cache=token_cache or CachedTokenStore(),
+            xaa_dev_client=xaa_dev_client,
         )
 
     async def execute(
@@ -182,16 +209,105 @@ class XAAOrchestrator:
             cached = self.token_cache.get(client_id, scope_str, subject)
             if cached is not None:
                 logger.info(
-                    "[3/6] ♻️  Using cached access token (skipping Okta ID-JAG request)"
+                    "[3/6] ♻️  Using cached access token "
+                    "(skipping ID-JAG request)"
                 )
                 logger.info(
-                    "[4/6] ♻️  Using cached access token (skipping resource exchange)"
+                    "[4/6] ♻️  Using cached access token "
+                    "(skipping resource exchange)"
                 )
                 access_token = cached
                 id_jag_expires_in = 0
                 was_cached = True
+            elif self.xaa_dev_client is not None:
+                # xaa.dev path: use the pre-obtained ID token from env and
+                # run Step 2 (token-exchange) + Step 3 (JWT-bearer grant).
+                id_token = os.environ.get("XAA_ID_TOKEN", "").strip()
+                if not id_token:
+                    raise XAAFlowError(
+                        step=STEP_OKTA_IDJAG,
+                        reason=(
+                            "USE_XAA_DEV=true but XAA_ID_TOKEN env var is "
+                            "empty. Run `python -m scripts.get_xaa_id_token` "
+                            "first to obtain an ID token, then export "
+                            "XAA_ID_TOKEN=..."
+                        ),
+                    )
+
+                step = STEP_OKTA_IDJAG
+                logger.info(
+                    "[3/6] 🏛️  Requesting ID-JAG from xaa.dev "
+                    "(token-exchange for audience %s)...",
+                    self.xaa_dev_client.config.auth_server_url,
+                )
+                try:
+                    id_jag_response = (
+                        await self.xaa_dev_client
+                        .exchange_id_token_for_id_jag(id_token)
+                    )
+                except XAADevError as exc:
+                    raise XAAFlowError(
+                        step=STEP_OKTA_IDJAG,
+                        reason=f"xaa.dev token-exchange failed: {exc}",
+                        cause=exc,
+                    ) from exc
+
+                id_jag = id_jag_response.get("access_token", "")
+                id_jag_expires_in = int(id_jag_response.get("expires_in", 0))
+                if not id_jag:
+                    raise XAAFlowError(
+                        step=STEP_OKTA_IDJAG,
+                        reason="xaa.dev returned no ID-JAG access_token",
+                    )
+                _log_jwt_claims("ID-JAG", id_jag)
+                logger.info(
+                    "[3/6] ✅ ID-JAG received, expires in %ds",
+                    id_jag_expires_in,
+                )
+
+                step = STEP_RESOURCE_EXCHANGE
+                logger.info(
+                    "[4/6] 🔄 Redeeming ID-JAG at xaa.dev auth server %s...",
+                    self.xaa_dev_client.config.auth_server_url,
+                )
+                try:
+                    at_response = (
+                        await self.xaa_dev_client
+                        .exchange_id_jag_for_access_token(id_jag)
+                    )
+                except XAADevError as exc:
+                    raise XAAFlowError(
+                        step=STEP_RESOURCE_EXCHANGE,
+                        reason=f"xaa.dev jwt-bearer grant failed: {exc}",
+                        cause=exc,
+                    ) from exc
+
+                at_expires_in = int(at_response.get("expires_in", 0))
+                access_token_str = at_response.get("access_token", "")
+                if not access_token_str:
+                    raise XAAFlowError(
+                        step=STEP_RESOURCE_EXCHANGE,
+                        reason="xaa.dev returned no access_token",
+                    )
+                _log_jwt_claims("access_token", access_token_str)
+                access_token = ResourceAccessToken(
+                    access_token=access_token_str,
+                    token_type=at_response.get("token_type", "Bearer"),
+                    expires_in=at_expires_in,
+                    scope=at_response.get("scope", scope_str),
+                    expires_at=int(time.time()) + at_expires_in,
+                )
+                self.token_cache.set(
+                    client_id, scope_str, subject, access_token,
+                )
+                logger.info(
+                    "[4/6] ✅ Access token received from xaa.dev: "
+                    "scope=%s, expires in %ds",
+                    access_token.scope, access_token.expires_in,
+                )
+                was_cached = False
             else:
-                # Step 3: Okta ID-JAG request
+                # Legacy Okta path (USE_XAA_DEV=false).
                 step = STEP_OKTA_IDJAG
                 logger.info(
                     "[3/6] 🏛️  Requesting ID-JAG from Okta for audience %s...",
@@ -255,6 +371,15 @@ class XAAOrchestrator:
 
             # ----- Step 6: MCP call -----
             step = STEP_MCP_CALL
+            if self.xaa_dev_client is not None:
+                logger.info(
+                    "[6/6] 🔑 xaa.dev access token would be sent to the "
+                    "resource API (%s) in production; for the PoC the MCP "
+                    "client instead uses its real backend credentials "
+                    "(Open-Meteo public API / Slack bot token).",
+                    self.xaa_dev_client.config.resource_audience
+                    or "<unconfigured>",
+                )
             logger.info(
                 "[6/6] 🌤️  Calling Weather MCP at %s...",
                 self.weather_client.config.url or "<stub mode>",
@@ -290,6 +415,31 @@ def _short_preview(result: Any, limit: int = 160) -> str:
     """Collapse an MCP result to a single log-friendly line."""
     text = repr(result)
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _log_jwt_claims(label: str, token: str) -> None:
+    """Log selected claims from a JWT at INFO level.
+
+    Used to make the xaa.dev handoffs visible in the demo (aud, sub,
+    resource, scope, exp). No signature verification — upstream layers
+    handle trust. Silently no-ops for opaque / malformed tokens so a
+    logging helper never breaks the flow.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return
+
+    selected = {
+        k: claims.get(k)
+        for k in ("aud", "sub", "iss", "resource", "scope", "exp")
+        if k in claims
+    }
+    logger.info("  %s claims: %s", label, selected)
 
 
 async def execute_xaa_flow(

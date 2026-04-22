@@ -68,6 +68,26 @@ class AgentConfig:
     avp_policy_store_id: str = os.getenv("AVP_POLICY_STORE_ID", "")
     aws_region: str = os.getenv("AWS_REGION", "us-east-1")
 
+    # xaa.dev configuration (used when USE_XAA_DEV=true).
+    # Pivot target while the production Okta tenant's XAA audience config is
+    # pending vendor support — xaa.dev is Okta's official XAA playground and
+    # speaks the same three-step protocol (auth code → ID-JAG → access token).
+    # When ``use_xaa_dev`` is False the legacy Okta path above is used.
+    use_xaa_dev: bool = os.getenv("USE_XAA_DEV", "false").lower() == "true"
+    xaa_idp_url: str = os.getenv("XAA_IDP_URL", "https://idp.xaa.dev")
+    xaa_auth_server_url: str = os.getenv(
+        "XAA_AUTH_SERVER_URL", "https://auth.resource.xaa.dev"
+    )
+    xaa_client_id: str = os.getenv("XAA_CLIENT_ID", "")
+    xaa_client_secret: str = os.getenv("XAA_CLIENT_SECRET", "")
+    xaa_resource_client_id: str = os.getenv("XAA_RESOURCE_CLIENT_ID", "")
+    xaa_resource_client_secret: str = os.getenv("XAA_RESOURCE_CLIENT_SECRET", "")
+    xaa_redirect_uri: str = os.getenv(
+        "XAA_REDIRECT_URI", "http://localhost:8000/callback"
+    )
+    xaa_resource_audience: str = os.getenv("XAA_RESOURCE_AUDIENCE", "")
+    xaa_scope: str = os.getenv("XAA_SCOPE", "openid email")
+
     # Delegating user
     delegating_user: str = os.getenv("DELEGATING_USER", "sarah@example.com")
 

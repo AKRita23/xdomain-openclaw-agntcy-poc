@@ -329,3 +329,127 @@ def test_xaaflow_error_carries_step_within_total():
     err = XAAFlowError(step=4, reason="boom")
     assert 1 <= err.step <= TOTAL_STEPS
     assert "step 4" in str(err)
+
+
+# --------------------------------------------------------------------------- xaa.dev path
+
+
+@pytest.fixture
+def xaa_dev_orchestrator(badge, monkeypatch):
+    """XAAOrchestrator wired with a mocked :class:`XAADevClient`.
+
+    Covers the USE_XAA_DEV=true branch: Steps 3 and 4 go through xaa.dev
+    (token-exchange + jwt-bearer) instead of the Okta path.
+    """
+    cfg = AgentConfig(
+        identity_service_url="http://identity.test",
+        mcp_servers={
+            "weather": MCPServerConfig(
+                name="weather", url="http://weather.test",
+                auth_domain="api.open-meteo.com", scopes=["weather:read"],
+            ),
+        },
+    )
+
+    badge_issuer = MagicMock()
+    badge_issuer.issue_badge = AsyncMock(return_value=badge)
+
+    badge_verifier = MagicMock()
+    badge_verifier.verify_badge = AsyncMock(return_value={
+        "valid": True, "badge_id": badge["badge_id"],
+        "capabilities": ["weather:read"],
+        "delegating_user": badge["delegating_user"],
+        "issuer": "did:web:example.com:issuer",
+        "issuance_date": "2026-04-19T00:00:00Z",
+    })
+
+    # The Okta client must NOT be invoked on this path.
+    xaa_client = MagicMock()
+    xaa_client.exchange_token = AsyncMock(side_effect=AssertionError(
+        "OktaXAAClient.exchange_token should not be called on the xaa.dev path"
+    ))
+
+    middleware = MagicMock()
+    middleware.enforce = AsyncMock(return_value=None)
+
+    weather_client = MagicMock()
+    weather_client.config = cfg.mcp_servers["weather"]
+    weather_client.call = AsyncMock(return_value={
+        "tool": "get_current_weather",
+        "result": {"location": "Austin, TX"},
+    })
+
+    xaa_dev_client = MagicMock()
+    xaa_dev_client.config = MagicMock()
+    xaa_dev_client.config.auth_server_url = "https://auth.resource.xaa.dev"
+    xaa_dev_client.config.resource_audience = "http://weather-slack-resources.com"
+    xaa_dev_client.exchange_id_token_for_id_jag = AsyncMock(return_value={
+        "access_token": "xaa.dev.id-jag",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:id-jag",
+        "token_type": "Bearer",
+        "expires_in": 300,
+    })
+    xaa_dev_client.exchange_id_jag_for_access_token = AsyncMock(return_value={
+        "access_token": "xaa.dev.access_token",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "openid email",
+    })
+
+    monkeypatch.setenv("XAA_ID_TOKEN", "sarah.id.token")
+
+    return XAAOrchestrator(
+        config=cfg,
+        badge_issuer=badge_issuer,
+        badge_verifier=badge_verifier,
+        xaa_client=xaa_client,
+        middleware=middleware,
+        weather_client=weather_client,
+        token_cache=CachedTokenStore(),
+        xaa_dev_client=xaa_dev_client,
+    )
+
+
+@pytest.mark.asyncio
+async def test_xaa_dev_path_runs_token_exchange_and_jwt_bearer(
+    xaa_dev_orchestrator, badge,
+):
+    result = await xaa_dev_orchestrator.execute(
+        task_name="weather_slack_notification",
+        target_audience="http://weather-slack-resources.com",
+        scopes=["weather:read"],
+        subject="sarah@example.com",
+    )
+
+    # Steps 3 + 4: both xaa.dev endpoints invoked, Okta client untouched
+    xaa_dev_orchestrator.xaa_dev_client.exchange_id_token_for_id_jag \
+        .assert_awaited_once_with("sarah.id.token")
+    xaa_dev_orchestrator.xaa_dev_client.exchange_id_jag_for_access_token \
+        .assert_awaited_once_with("xaa.dev.id-jag")
+    xaa_dev_orchestrator.xaa_client.exchange_token.assert_not_called()
+
+    # Step 6: MCP call uses the xaa.dev access token
+    xaa_dev_orchestrator.weather_client.call.assert_awaited_once_with(
+        token="xaa.dev.access_token",
+    )
+    assert result.access_token_scope == "openid email"
+    assert result.id_jag_expires_in == 300
+
+
+@pytest.mark.asyncio
+async def test_xaa_dev_path_requires_id_token_env_var(
+    xaa_dev_orchestrator, monkeypatch,
+):
+    monkeypatch.delenv("XAA_ID_TOKEN", raising=False)
+    with pytest.raises(XAAFlowError) as excinfo:
+        await xaa_dev_orchestrator.execute(
+            task_name="t",
+            target_audience="http://weather-slack-resources.com",
+            scopes=["weather:read"],
+            subject="sarah@example.com",
+        )
+    assert excinfo.value.step == 3
+    assert "XAA_ID_TOKEN" in excinfo.value.reason
+    assert "get_xaa_id_token" in excinfo.value.reason
+    xaa_dev_orchestrator.xaa_dev_client.exchange_id_token_for_id_jag \
+        .assert_not_called()
