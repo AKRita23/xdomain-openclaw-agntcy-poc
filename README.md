@@ -74,6 +74,53 @@
 - Checks delegation chain integrity
 - Blocks scope escalation attempts
 
+## xaa.dev Pivot (current demo path)
+
+While the production Okta tenant's XAA audience config update is pending
+vendor support, the PoC's XAA layer points at **xaa.dev** — Okta's
+official XAA playground — instead of the internal Okta tenant. xaa.dev
+speaks the same three-step XAA protocol (authorization_code →
+token-exchange (ID-JAG) → jwt-bearer grant), so only the endpoints and
+credentials change; Layers 1 (AGNTCY badge), 2b (tool scope assertion),
+5 (TBAC), and 6 (Slack + Open-Meteo) are unchanged.
+
+The legacy Okta path is preserved behind `USE_XAA_DEV=false` and will be
+re-enabled once the production tenant is updated.
+
+### How to run against xaa.dev
+
+1. **Register an app** at https://xaa.dev. You'll receive four
+   credentials: a main (IdP) client id + secret, and a resource client
+   id + secret (the resource client id has the shape
+   `{client_id}-at-res_{uuid}`).
+2. **Export env vars**:
+   ```bash
+   export USE_XAA_DEV=true
+   export XAA_CLIENT_ID=<main-client-id>
+   export XAA_CLIENT_SECRET=<main-client-secret>
+   export XAA_RESOURCE_CLIENT_ID=<resource-client-id>
+   export XAA_RESOURCE_CLIENT_SECRET=<resource-client-secret>
+   export XAA_RESOURCE_AUDIENCE=http://weather-slack-resources.com
+   # optional: XAA_IDP_URL, XAA_AUTH_SERVER_URL, XAA_REDIRECT_URI, XAA_SCOPE
+   ```
+3. **Obtain Sarah's ID token** via the interactive CLI helper (opens a
+   browser, captures the redirect at `localhost:8000`, prints the ID
+   token to stdout):
+   ```bash
+   export XAA_ID_TOKEN=$(python -m scripts.get_xaa_id_token 2>/dev/null)
+   ```
+4. **Run the orchestrator demo**:
+   ```bash
+   python -m agent.xaa_orchestrator --demo
+   ```
+
+Steps 3 + 4 of the flow now hit xaa.dev (`/token` twice — once for
+token-exchange, once for jwt-bearer). Step 6 MCP calls still use real
+Slack bot token + Open-Meteo's public REST API — the xaa.dev access
+token's role is to prove the cross-domain XAA flow completed; in
+production, that same token would be presented as the Bearer token to
+the protected resource API.
+
 ## Project Structure
 
 ```
