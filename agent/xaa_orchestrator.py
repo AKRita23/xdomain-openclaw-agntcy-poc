@@ -7,12 +7,13 @@ narrated async function, :func:`execute_xaa_flow` (or its class form
 does not modify them.
 
 Flow:
-    1. Badge fetch           — BadgeIssuer.issue_badge
-    2. Badge verify          — BadgeVerifier.verify_badge
-    3. Okta ID-JAG request   — OktaXAAClient.exchange_token
-    4. Resource exchange     — resource_exchange.exchange_id_jag_for_access_token
-    5. TBAC check            — IdentityServiceMCPMiddleware.enforce
-    6. MCP call              — WeatherMCPClient.call
+    1.  Badge fetch          — BadgeIssuer.issue_badge
+    2.  Badge verify         — BadgeVerifier.verify_badge
+    3.  Okta ID-JAG request  — OktaXAAClient.exchange_token
+    4.  Resource exchange    — resource_exchange.exchange_id_jag_for_access_token
+    5.  TBAC check           — IdentityServiceMCPMiddleware.enforce
+    6a. Weather MCP call     — WeatherMCPClient.call
+    6b. Slack notification   — SlackMCPClient.call (best-effort)
 
 Access tokens from step 4 are cached via
 :class:`identity.resource_exchange.CachedTokenStore` keyed by
@@ -42,6 +43,7 @@ from identity.resource_exchange import (
     exchange_id_jag_for_access_token,
 )
 from identity.xaa_dev_client import XAADevClient, XAADevConfig, XAADevError
+from mcp_servers.slack_mcp import SlackMCPClient
 from mcp_servers.weather_mcp import WeatherMCPClient
 from middleware.agntcy_tbac import IdentityServiceMCPMiddleware
 
@@ -104,6 +106,7 @@ class XAAOrchestrator:
     xaa_client: OktaXAAClient
     middleware: IdentityServiceMCPMiddleware
     weather_client: WeatherMCPClient
+    slack_client: SlackMCPClient
     token_cache: CachedTokenStore = field(default_factory=CachedTokenStore)
     resource_client_id: Optional[str] = None
     xaa_dev_client: Optional[XAADevClient] = None
@@ -158,6 +161,7 @@ class XAAOrchestrator:
                 metadata_id=cfg.agntcy_metadata_id,
             ),
             weather_client=WeatherMCPClient(cfg.mcp_servers["weather"]),
+            slack_client=SlackMCPClient(cfg.mcp_servers["slack"]),
             token_cache=token_cache or CachedTokenStore(),
             xaa_dev_client=xaa_dev_client,
         )
@@ -381,13 +385,56 @@ class XAAOrchestrator:
                     or "<unconfigured>",
                 )
             logger.info(
-                "[6/6] 🌤️  Calling Weather MCP at %s...",
+                "[6a/6] 🌤️  Calling Weather MCP at %s...",
                 self.weather_client.config.url or "<stub mode>",
             )
-            mcp_result = await self.weather_client.call(
+            weather_result = await self.weather_client.call(
                 token=access_token.access_token
             )
-            logger.info("[6/6] ✅ Weather data received: %s", _short_preview(mcp_result))
+            logger.info(
+                "[6a/6] ✅ Weather data received: %s",
+                _short_preview(weather_result),
+            )
+
+            # ----- Step 6b: Slack notification (best-effort) -----
+            # A Slack failure does NOT fail the XAA flow — the XAA portion
+            # already completed by the time we get here, and the demo's
+            # narrative is that cross-domain auth worked. The fan-out
+            # notification is a downstream side effect.
+            slack_channel = os.getenv("SLACK_CHANNEL", "")
+            slack_text = _format_weather_alert(subject, weather_result)
+            slack_result: Dict[str, Any]
+            if not slack_channel:
+                logger.warning(
+                    "[6b/6] ⚠️  SLACK_CHANNEL env var not set — "
+                    "skipping Slack post"
+                )
+                slack_result = {"skipped": True, "reason": "SLACK_CHANNEL unset"}
+            else:
+                logger.info(
+                    "[6b/6] 💬 Posting weather alert to Slack channel %s...",
+                    slack_channel,
+                )
+                try:
+                    slack_result = await self.slack_client.call(
+                        token=access_token.access_token,
+                        tool="slack_post_message",
+                        arguments={
+                            "channel": slack_channel,
+                            "text": slack_text,
+                        },
+                    )
+                    logger.info(
+                        "[6b/6] ✅ Slack posted: %s",
+                        _short_preview(slack_result),
+                    )
+                except Exception as exc:  # non-fatal
+                    logger.warning(
+                        "[6b/6] ⚠️  Slack post failed (non-fatal): %s", exc,
+                    )
+                    slack_result = {"error": str(exc)}
+
+            mcp_result = {"weather": weather_result, "slack": slack_result}
 
             logger.info("")
             logger.info("✅ XAA flow complete — end-to-end success")
@@ -415,6 +462,40 @@ def _short_preview(result: Any, limit: int = 160) -> str:
     """Collapse an MCP result to a single log-friendly line."""
     text = repr(result)
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _format_weather_alert(subject: str, weather_result: Dict[str, Any]) -> str:
+    """Compose the Slack notification text from a Weather MCP result.
+
+    Degrades gracefully for both REST-mode payloads (Open-Meteo's
+    ``current`` block) and stub payloads, and for missing fields —
+    reports 'n/a' instead of crashing.
+    """
+    data = weather_result.get("result", {}) if isinstance(weather_result, dict) else {}
+    current = data.get("current") if isinstance(data, dict) else None
+
+    def _fmt_num(value: Any, unit: str) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            return f"{float(value):g}{unit}"
+        except (TypeError, ValueError):
+            return f"{value}{unit}"
+
+    if isinstance(current, dict):
+        temp = _fmt_num(current.get("temperature_2m"), "°C")
+        wind = _fmt_num(current.get("wind_speed_10m"), " km/h")
+        humidity = _fmt_num(current.get("relative_humidity_2m"), "%")
+    else:
+        temp_c = data.get("temperature_c") if isinstance(data, dict) else None
+        temp = _fmt_num(temp_c, "°C")
+        wind = _fmt_num(data.get("wind_mph") if isinstance(data, dict) else None, " mph")
+        humidity = _fmt_num(data.get("humidity") if isinstance(data, dict) else None, "%")
+
+    return (
+        f"🌤️ Weather alert for {subject}: {temp}, wind {wind}, humidity {humidity}\n"
+        f"Delivered via OpenClaw agent with XAA-validated access."
+    )
 
 
 def _log_jwt_claims(label: str, token: str) -> None:
@@ -521,8 +602,13 @@ def _cli_main(argv: Optional[List[str]] = None) -> int:
 
     if args.demo:
         task_name = "weather_slack_notification"
-        subject = "sarah@example.com"
-        target_audience = "http://18.233.200.161:5001/"
+        subject = os.getenv("DELEGATING_USER", "sarah@agentex.io")
+        # Target audience: xaa.dev resource when configured, otherwise
+        # fall back to the Okta audience or the legacy local resource URL.
+        target_audience = (
+            os.getenv("XAA_RESOURCE_AUDIENCE", "")
+            or os.getenv("OKTA_AUDIENCE", "http://localhost:5001/")
+        )
         scopes = ["weather:read"]
     else:
         missing = [

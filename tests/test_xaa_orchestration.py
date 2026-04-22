@@ -59,6 +59,12 @@ def orchestrator(badge, access_token, monkeypatch):
                 auth_domain="api.open-meteo.com",
                 scopes=["weather:read"],
             ),
+            "slack": MCPServerConfig(
+                name="slack",
+                url="http://slack.test",
+                auth_domain="slack.com",
+                scopes=["slack:chat:write"],
+            ),
         },
     )
 
@@ -96,9 +102,21 @@ def orchestrator(badge, access_token, monkeypatch):
             "tool": "get_current_weather",
             "result": {
                 "location": "Austin, TX",
-                "temperature_c": 22.0,
-                "condition": "partly cloudy",
+                "current": {
+                    "temperature_2m": 18.4,
+                    "wind_speed_10m": 12.0,
+                    "relative_humidity_2m": 62,
+                },
             },
+        }
+    )
+
+    slack_client = MagicMock()
+    slack_client.config = cfg.mcp_servers["slack"]
+    slack_client.call = AsyncMock(
+        return_value={
+            "tool": "slack_post_message",
+            "result": {"ok": True, "channel": "C123", "ts": "1.2"},
         }
     )
 
@@ -106,6 +124,7 @@ def orchestrator(badge, access_token, monkeypatch):
         "agent.xaa_orchestrator.exchange_id_jag_for_access_token",
         lambda id_jag, client_id, scope: access_token,
     )
+    monkeypatch.setenv("SLACK_CHANNEL", "#xaa-demo")
 
     return XAAOrchestrator(
         config=cfg,
@@ -114,6 +133,7 @@ def orchestrator(badge, access_token, monkeypatch):
         xaa_client=xaa_client,
         middleware=middleware,
         weather_client=weather_client,
+        slack_client=slack_client,
         token_cache=CachedTokenStore(),
     )
 
@@ -153,19 +173,32 @@ async def test_full_flow_runs_all_six_steps_in_order(orchestrator, badge, access
     assert tbac_kwargs["xaa_token"]["access_token"] == access_token.access_token
     assert tbac_kwargs["xaa_token"]["task"] == "weather_slack_notification"
 
-    # Step 6 — MCP call used the resource-auth-server access token
+    # Step 6a — Weather MCP call used the resource-auth-server access token
     orchestrator.weather_client.call.assert_awaited_once_with(
         token=access_token.access_token
     )
 
-    # Structured result reflects the chain
+    # Step 6b — Slack MCP call used the same access token with a formatted
+    # alert containing the subject and the Open-Meteo current block.
+    orchestrator.slack_client.call.assert_awaited_once()
+    slack_call = orchestrator.slack_client.call.await_args
+    assert slack_call.kwargs["token"] == access_token.access_token
+    assert slack_call.kwargs["tool"] == "slack_post_message"
+    slack_args = slack_call.kwargs["arguments"]
+    assert slack_args["channel"] == "#xaa-demo"
+    assert "sarah@example.com" in slack_args["text"]
+    assert "18.4" in slack_args["text"]
+
+    # Structured result reflects the chain — mcp_result now has both
+    # weather and slack sub-results.
     assert result.task_name == "weather_slack_notification"
     assert result.badge_id == badge["badge_id"]
     assert result.id_jag_expires_in == 300
     assert result.access_token_scope == "weather:read"
     assert result.access_token_expires_in == 3600
     assert result.cached is False
-    assert result.mcp_result["result"]["location"] == "Austin, TX"
+    assert result.mcp_result["weather"]["result"]["location"] == "Austin, TX"
+    assert result.mcp_result["slack"]["result"]["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -348,6 +381,10 @@ def xaa_dev_orchestrator(badge, monkeypatch):
                 name="weather", url="http://weather.test",
                 auth_domain="api.open-meteo.com", scopes=["weather:read"],
             ),
+            "slack": MCPServerConfig(
+                name="slack", url="http://slack.test",
+                auth_domain="slack.com", scopes=["slack:chat:write"],
+            ),
         },
     )
 
@@ -379,6 +416,13 @@ def xaa_dev_orchestrator(badge, monkeypatch):
         "result": {"location": "Austin, TX"},
     })
 
+    slack_client = MagicMock()
+    slack_client.config = cfg.mcp_servers["slack"]
+    slack_client.call = AsyncMock(return_value={
+        "tool": "slack_post_message",
+        "result": {"ok": True},
+    })
+
     xaa_dev_client = MagicMock()
     xaa_dev_client.config = MagicMock()
     xaa_dev_client.config.auth_server_url = "https://auth.resource.xaa.dev"
@@ -397,6 +441,7 @@ def xaa_dev_orchestrator(badge, monkeypatch):
     })
 
     monkeypatch.setenv("XAA_ID_TOKEN", "sarah.id.token")
+    monkeypatch.setenv("SLACK_CHANNEL", "#xaa-demo")
 
     return XAAOrchestrator(
         config=cfg,
@@ -405,6 +450,7 @@ def xaa_dev_orchestrator(badge, monkeypatch):
         xaa_client=xaa_client,
         middleware=middleware,
         weather_client=weather_client,
+        slack_client=slack_client,
         token_cache=CachedTokenStore(),
         xaa_dev_client=xaa_dev_client,
     )
@@ -453,3 +499,116 @@ async def test_xaa_dev_path_requires_id_token_env_var(
     assert "get_xaa_id_token" in excinfo.value.reason
     xaa_dev_orchestrator.xaa_dev_client.exchange_id_token_for_id_jag \
         .assert_not_called()
+
+
+# --------------------------------------------------------------------------- Slack wiring
+
+
+@pytest.mark.asyncio
+async def test_slack_failure_does_not_fail_the_xaa_flow(orchestrator):
+    """Slack is step 6b — a failure there must NOT raise XAAFlowError.
+
+    The XAA protocol portion has already succeeded by then, and the fan-out
+    Slack post is a side effect the demo can tolerate losing.
+    """
+    orchestrator.slack_client.call = AsyncMock(
+        side_effect=RuntimeError("slack down"),
+    )
+    result = await orchestrator.execute(
+        task_name="weather_slack_notification",
+        target_audience="api.open-meteo.com",
+        scopes=["weather:read"],
+        subject="sarah@example.com",
+    )
+    assert result.mcp_result["weather"]["result"]["location"] == "Austin, TX"
+    assert result.mcp_result["slack"]["error"] == "slack down"
+
+
+@pytest.mark.asyncio
+async def test_slack_skipped_when_channel_env_unset(orchestrator, monkeypatch):
+    monkeypatch.delenv("SLACK_CHANNEL", raising=False)
+    result = await orchestrator.execute(
+        task_name="weather_slack_notification",
+        target_audience="api.open-meteo.com",
+        scopes=["weather:read"],
+        subject="sarah@example.com",
+    )
+    orchestrator.slack_client.call.assert_not_called()
+    assert result.mcp_result["slack"]["skipped"] is True
+
+
+# --------------------------------------------------------------------------- --demo CLI
+
+
+def test_demo_subject_and_audience_read_from_env(monkeypatch):
+    """--demo must prefer env vars over the old hardcoded defaults."""
+    from unittest.mock import patch
+
+    import agent.xaa_orchestrator as orch
+
+    monkeypatch.setenv("DELEGATING_USER", "customdemo@agentex.io")
+    monkeypatch.setenv("XAA_RESOURCE_AUDIENCE", "http://my-res.example/")
+    # OKTA_AUDIENCE should be ignored when XAA_RESOURCE_AUDIENCE is set.
+    monkeypatch.setenv("OKTA_AUDIENCE", "http://okta-audience/")
+
+    captured = {}
+
+    async def _fake_flow(task_name, target_audience, scopes, subject,
+                         **_kwargs):
+        captured.update(
+            task_name=task_name,
+            target_audience=target_audience,
+            scopes=scopes,
+            subject=subject,
+        )
+
+        class _Result:
+            pass
+
+        r = _Result()
+        r.task_name = "weather_slack_notification"
+        r.subject = subject
+        r.cached = False
+        r.mcp_result = {"weather": {}, "slack": {}}
+        return r
+
+    with patch.object(orch, "execute_xaa_flow", side_effect=_fake_flow):
+        rc = orch._cli_main(["--demo"])
+
+    assert rc == 0
+    assert captured["subject"] == "customdemo@agentex.io"
+    assert captured["target_audience"] == "http://my-res.example/"
+    assert captured["task_name"] == "weather_slack_notification"
+    assert captured["scopes"] == ["weather:read"]
+
+
+def test_demo_subject_falls_back_to_default_when_env_unset(monkeypatch):
+    from unittest.mock import patch
+
+    import agent.xaa_orchestrator as orch
+
+    monkeypatch.delenv("DELEGATING_USER", raising=False)
+    monkeypatch.delenv("XAA_RESOURCE_AUDIENCE", raising=False)
+    monkeypatch.delenv("OKTA_AUDIENCE", raising=False)
+
+    captured = {}
+
+    async def _fake_flow(task_name, target_audience, scopes, subject,
+                         **_kwargs):
+        captured.update(target_audience=target_audience, subject=subject)
+
+        class _Result:
+            pass
+
+        r = _Result()
+        r.task_name = "weather_slack_notification"
+        r.subject = subject
+        r.cached = False
+        r.mcp_result = {}
+        return r
+
+    with patch.object(orch, "execute_xaa_flow", side_effect=_fake_flow):
+        orch._cli_main(["--demo"])
+
+    assert captured["subject"] == "sarah@agentex.io"
+    assert captured["target_audience"] == "http://localhost:5001/"
