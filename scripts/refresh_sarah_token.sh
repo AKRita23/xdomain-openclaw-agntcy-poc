@@ -18,7 +18,7 @@ TOKEN_ENDPOINT="https://agntcydev1.oktapreview.com/oauth2/v1/token"
 
 # openclaw-agent (catalog app) credentials
 CLIENT_ID="0oad9x2gnbmQOy1lC0x7"
-CLIENT_SECRET="bLP9c3jetIczK1rg-mqfKMCseFRLw8KxgCfZdGmWDBfEI7xQeyBmmV-Q33H9hEfI"
+CLIENT_SECRET="${OKTA_CLIENT_SECRET:?Set OKTA_CLIENT_SECRET}"
 
 SCOPE="openid profile email"
 

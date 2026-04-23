@@ -40,3 +40,11 @@ docker-compose.override.yml
 # Node (for AGNTCY Node Backend)
 node_modules/
 npm-debug.log
+
+# Local backup files
+*.bak
+*.bak2
+
+# Demo logs
+demo-pathA*.log
+demo-pathB*.log

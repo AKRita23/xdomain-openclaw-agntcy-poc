@@ -175,7 +175,7 @@ class XAAOrchestrator:
     ) -> XAAFlowResult:
         """Run the full six-step XAA flow, narrating each step via logging."""
         scope_str = " ".join(scopes)
-        client_id = self.resource_client_id or self.config.okta_client_id or "openclaw-agent"
+        client_id = os.getenv("RESOURCE_AUTH_CLIENT_ID") or self.resource_client_id or self.config.okta_client_id or "openclaw-agent"
 
         step = STEP_BADGE_FETCH
         try:
@@ -247,7 +247,7 @@ class XAAOrchestrator:
                 try:
                     id_jag_response = (
                         await self.xaa_dev_client
-                        .exchange_id_token_for_id_jag(id_token)
+                        .exchange_id_token_for_id_jag(id_token, scope=scope_str)
                     )
                 except XAADevError as exc:
                     raise XAAFlowError(
@@ -277,7 +277,7 @@ class XAAOrchestrator:
                 try:
                     at_response = (
                         await self.xaa_dev_client
-                        .exchange_id_jag_for_access_token(id_jag)
+                        .exchange_id_jag_for_access_token(id_jag, scope=scope_str)
                     )
                 except XAADevError as exc:
                     raise XAAFlowError(
@@ -609,7 +609,7 @@ def _cli_main(argv: Optional[List[str]] = None) -> int:
             os.getenv("XAA_RESOURCE_AUDIENCE", "")
             or os.getenv("OKTA_AUDIENCE", "http://localhost:5001/")
         )
-        scopes = ["weather:read"]
+        scopes = ["weather.read", "slack.post.agent-weather-alerts"]
     else:
         missing = [
             name

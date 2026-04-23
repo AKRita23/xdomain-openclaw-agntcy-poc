@@ -36,6 +36,8 @@ class OktaXAAClient:
     CLIENT_CREDENTIALS_GRANT = "client_credentials"
     JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
     ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+    ID_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id_token"
+    ID_JAG_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id-jag"
 
     TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 
@@ -43,8 +45,8 @@ class OktaXAAClient:
 
     # Map scopes to resource domain targets
     SCOPE_TO_RESOURCE = {
-        "weather:read": "weather",
-        "slack:chat:write": "slack",
+        "weather.read": "weather",
+        "slack.post.agent-weather-alerts": "slack",
     }
 
     def __init__(
@@ -74,7 +76,7 @@ class OktaXAAClient:
         self.issuer = issuer
         self.token_endpoint = (
             token_endpoint
-            or f"https://{domain}/oauth2/{auth_server_id}/v1/token"
+            or f"https://{domain}/oauth2/v1/token"
         )
         # Org 2 config
         self.org2_domain = org2_domain
@@ -172,7 +174,7 @@ class OktaXAAClient:
 
         # Step 2 — Exchange Sarah's token at Org 2
         org2_token_endpoint = (
-            f"https://{self.org2_domain}/oauth2/{org2_auth_server_id}/v1/token"
+            f"https://{self.org2_domain}/oauth2/v1/token"
         )
         logger.info(
             "Exchanging Sarah's token at Org 2: %s audience=%s scopes=%s",
@@ -180,11 +182,13 @@ class OktaXAAClient:
         )
         exchange_data = {
             "grant_type": self.TOKEN_EXCHANGE_GRANT,
-            "client_id": self.resource_app_client_id,
-            "client_secret": self.resource_app_client_secret,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "requested_token_type": self.ID_JAG_TOKEN_TYPE,
             "subject_token": sarah_token,
-            "subject_token_type": self.ACCESS_TOKEN_TYPE,
+            "subject_token_type": self.ID_TOKEN_TYPE,
             "audience": resolved_audience,
+            "resource": resolved_audience,
             "scope": " ".join(scopes) if scopes else "",
         }
 
@@ -192,10 +196,12 @@ class OktaXAAClient:
             resp = await client.post(org2_token_endpoint, data=exchange_data)
 
         if resp.status_code != 200:
+            error_body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"body": resp.text}
+            logger.error("Okta token exchange rejected: status=%s body=%s", resp.status_code, error_body)
             raise TokenExchangeError(
-                reason=f"Token exchange failed: Org 2 returned {resp.status_code}",
+                reason=f"Token exchange failed: Org 2 returned {resp.status_code}: {error_body}",
                 status_code=resp.status_code,
-                details=resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"body": resp.text},
+                details=error_body,
             )
 
         result = resp.json()

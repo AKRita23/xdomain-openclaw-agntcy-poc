@@ -142,7 +142,7 @@ class XAADevClient:
         return await self._post_form(url, form)
 
     async def exchange_id_token_for_id_jag(
-        self, id_token: str,
+        self, id_token: str, scope: str = "",
     ) -> Dict[str, Any]:
         """Step 2 — token-exchange the ID token for an ID-JAG assertion."""
         url = f"{self.config.idp_url}/token"
@@ -156,14 +156,16 @@ class XAADevClient:
             "client_id": self.config.client_id,
             "client_secret": self.config.client_secret,
         }
+        if scope:
+            form["scope"] = scope
         logger.info(
-            "[xaa.dev] Step 2: POST %s grant=token-exchange audience=%s resource=%s",
-            url, self.config.auth_server_url, self.config.resource_audience,
+            "[xaa.dev] Step 2: POST %s grant=token-exchange audience=%s resource=%s scope=%s",
+            url, self.config.auth_server_url, self.config.resource_audience, scope,
         )
         return await self._post_form(url, form)
 
     async def exchange_id_jag_for_access_token(
-        self, id_jag: str,
+        self, id_jag: str, scope: str = "",
     ) -> Dict[str, Any]:
         """Step 3 — JWT Bearer grant to redeem the ID-JAG for an access token.
 
@@ -178,9 +180,11 @@ class XAADevClient:
             "client_id": self.config.resource_client_id,
             "client_secret": self.config.resource_client_secret,
         }
+        if scope:
+            form["scope"] = scope
         logger.info(
-            "[xaa.dev] Step 3: POST %s grant=jwt-bearer resource_client_id=%s",
-            url, self.config.resource_client_id,
+            "[xaa.dev] Step 3: POST %s grant=jwt-bearer resource_client_id=%s scope=%s",
+            url, self.config.resource_client_id, scope,
         )
         return await self._post_form(url, form)
 
