@@ -169,29 +169,6 @@ deployment.
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Env var template |
 
-## Demo runbook
-
-For a clean demo run:
-
-```bash
-# 1. SSH from local with port forward (for browser auth callback)
-ssh -L 8080:localhost:8080 -i <key.pem> ubuntu@13.222.140.133
-
-# 2. On Lightsail #1
-cd ~/xdomain-openclaw-agntcy-poc
-source .venv/bin/activate
-source ~/lightsail-env-pathB.sh   # (or pathA equivalent)
-
-# 3. Free port 8080
-sudo lsof -ti:8080 | xargs -r sudo kill -9 2>/dev/null
-
-# 4. Bootstrap fresh ID token (1-hour expiry)
-python -m scripts.get_okta_sarah_token   # or get_xaa_id_token for Path A
-export SARAH_ACCESS_TOKEN="<paste JWT>"  # or XAA_ID_TOKEN
-
-# 5. Run
-python -m agent.xaa_orchestrator --demo 2>&1 | tee demo-run.log
-```
 
 ## Resource API enforcement (open work)
 
