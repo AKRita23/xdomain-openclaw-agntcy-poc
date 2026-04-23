@@ -13,40 +13,12 @@ The PoC supports **two interchangeable IdP backends** for the XAA flow:
 Both paths use identical orchestrator code; only env vars and credentials change.
 
 ## Architecture
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Human User (Sarah)                          │
-│                       delegates task to agent                       │
-└────────────────────────────┬────────────────────────────────────────┘
-│
-▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                       OpenClaw Agent (Lightsail #1)                 │
-│                                                                     │
-│  ┌──────────────┐  ┌──────────────────┐  ┌───────────────────────┐  │
-│  │ AGNTCY Badge │  │  XAA ID-JAG      │  │ TBAC Middleware       │  │
-│  │ (capability  │  │  (cross-domain   │  │ (badge ⨯ scope        │  │
-│  │  attestation)│  │   auth grant)    │  │  enforcement)         │  │
-│  └──────┬───────┘  └────────┬─────────┘  └──────────┬────────────┘  │
-└─────────┼───────────────────┼───────────────────────┼───────────────┘
-│                   │                       │
-▼                   ▼                       ▼
-┌───────────┐       ┌──────────────┐       ┌───────────────┐
-│ AGNTCY    │       │  IdP         │       │  Resource     │
-│ Identity  │       │  - xaa.dev   │       │  Auth Server  │
-│ Node      │       │  - Okta      │       │  (Lightsail #2)│
-└───────────┘       └──────────────┘       └───────┬───────┘
-│
-┌─────────────────────┼─────────────┐
-▼                                   ▼
-┌─────────────────┐                  ┌──────────────┐
-│  Weather MCP    │                  │  Slack MCP   │
-│  (Open-Meteo)   │                  │  (Slack API) │
-└─────────────────┘                  └──────────────┘
+<img width="971" height="681" alt="Screenshot 2026-04-22 at 9 21 31 PM" src="https://github.com/user-attachments/assets/c65135d5-0a50-48bf-b82e-203ec415fcfd" />
 
 **Two-instance deployment:**
 
-- **Lightsail #1** (`13.222.140.133`) — AGNTCY identity node (port 4000) + OpenClaw orchestrator + MCP servers
-- **Lightsail #2** (`18.233.200.161:5001`) — Resource authorization server (validates ID-JAGs, mints access tokens)
+- **Lightsail #1**  — AGNTCY identity node (port 4000) + OpenClaw orchestrator + MCP servers
+- **Lightsail #2**  — Resource authorization server (validates ID-JAGs, mints access tokens)
 
 ## End-to-end flow (6 steps)
 
@@ -177,28 +149,25 @@ be replaced with real values via Okta XAA team configuration in a production
 deployment.
 
 ## Project Structure
-├── agent/
-│   ├── xaa_orchestrator.py     # 6-step XAA flow orchestrator
-│   ├── config.py               # AgentConfig (env var loader)
-│   └── ...
-├── identity/
-│   ├── badge_issuer.py         # AGNTCY badge fetch
-│   ├── badge_verifier.py       # AGNTCY badge verification
-│   ├── okta_xaa.py             # Okta token-exchange (Path B)
-│   ├── xaa_dev_client.py       # xaa.dev token-exchange (Path A)
-│   └── resource_exchange.py    # ID-JAG → access token at resource auth server
-├── middleware/
-│   └── agntcy_tbac.py          # TBAC enforcement (badge ⨯ scope)
-├── mcp_servers/
-│   ├── weather_mcp.py
-│   └── slack_mcp.py
-├── resource-auth-server/        # Standalone auth server (Lightsail #2)
-│   └── main.py                  # Validates ID-JAGs, mints access tokens
-├── scripts/
-│   ├── get_xaa_id_token.py      # Sarah's ID token bootstrap (xaa.dev)
-│   └── get_okta_sarah_token.py  # Sarah's ID token bootstrap (Okta)
-├── tests/
-└── requirements.txt
+| Path | Purpose |
+|------|---------|
+| `agent/xaa_orchestrator.py` | 6-step XAA flow orchestrator |
+| `agent/config.py` | `AgentConfig` env var loader |
+| `identity/badge_issuer.py` | AGNTCY badge fetch from well-known endpoint |
+| `identity/badge_verifier.py` | AGNTCY badge cryptographic verification |
+| `identity/xaa_dev_client.py` | **Path A** — xaa.dev IdP token exchange |
+| `identity/okta_xaa.py` | **Path B** — Okta IdP token exchange |
+| `identity/resource_exchange.py` | ID-JAG → access token redemption at resource auth server |
+| `middleware/agntcy_tbac.py` | TBAC enforcement (badge.capabilities ⨯ token.scopes ⨯ task) |
+| `mcp_servers/weather_mcp.py` | Open-Meteo tool dispatcher |
+| `mcp_servers/slack_mcp.py` | Slack `chat.postMessage` tool dispatcher |
+| `resource-auth-server/main.py` | Standalone resource auth server (Lightsail #2) |
+| `scripts/get_xaa_id_token.py` | Sarah's ID token bootstrap — Path A |
+| `scripts/get_okta_sarah_token.py` | Sarah's ID token bootstrap — Path B |
+| `tests/` | Unit + integration tests |
+| `docs/xaa-flow.png` | Architecture diagram |
+| `requirements.txt` | Python dependencies |
+| `.env.example` | Env var template |
 
 ## Demo runbook
 
