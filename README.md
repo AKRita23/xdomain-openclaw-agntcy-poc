@@ -1,216 +1,239 @@
-# Cross-Domain Agent Identity PoC — Version A: AGNTCY Identity Service TBAC
+# Cross-Domain Agent Identity PoC — AGNTCY + XAA
 
 > OpenClaw agent executing cross-domain tasks on behalf of a human user (Sarah),
-> with identity attestation via AGNTCY Identity badges and Task-Based Access
-> Control (TBAC) enforcement via IdentityServiceMCPMiddleware.
+> with capability attestation via AGNTCY Identity badges, OAuth scope enforcement
+> via XAA-issued access tokens, and Task-Based Access Control (TBAC) at the
+> orchestrator middleware layer.
+
+The PoC supports **two interchangeable IdP backends** for the XAA flow:
+
+- **Path A — xaa.dev IdP** (Okta's official XAA playground)
+- **Path B — Okta tenant IdP** (production-style enterprise governance)
+
+Both paths use identical orchestrator code; only env vars and credentials change.
 
 ## Architecture
-
-```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Human User (Sarah)                          │
-│                     delegates task to agent                        │
+│                         Human User (Sarah)                          │
+│                       delegates task to agent                       │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
+│
+▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      OpenClaw Agent                                 │
+│                       OpenClaw Agent (Lightsail #1)                 │
 │                                                                     │
-│  ┌──────────────┐  ┌──────────────────┐  ┌───────────────────────┐ │
-│  │ AGNTCY Badge │  │  Okta XAA        │  │ TBAC Middleware       │ │
-│  │ (Identity)   │  │  (ID-JAG)        │  │ (IdentityService     │ │
-│  │              │  │                  │  │  MCPMiddleware)       │ │
-│  └──────┬───────┘  └────────┬─────────┘  └──────────┬────────────┘ │
-└─────────┼───────────────────┼───────────────────────┼──────────────┘
-          │                   │                       │
-          ▼                   ▼                       ▼
-┌──────────────┐                             ┌──────────────┐
-│   Weather    │                             │    Slack     │
-│  (Open-Meteo)│                             │  MCP Server  │
-│              │                             │              │
-│ Domain:      │                             │ Domain:      │
-│ api.open-    │                             │ slack.com    │
-│ meteo.com    │                             │              │
-└──────────────┘                             └──────────────┘
-```
-## End to End Flow 
+│  ┌──────────────┐  ┌──────────────────┐  ┌───────────────────────┐  │
+│  │ AGNTCY Badge │  │  XAA ID-JAG      │  │ TBAC Middleware       │  │
+│  │ (capability  │  │  (cross-domain   │  │ (badge ⨯ scope        │  │
+│  │  attestation)│  │   auth grant)    │  │  enforcement)         │  │
+│  └──────┬───────┘  └────────┬─────────┘  └──────────┬────────────┘  │
+└─────────┼───────────────────┼───────────────────────┼───────────────┘
+│                   │                       │
+▼                   ▼                       ▼
+┌───────────┐       ┌──────────────┐       ┌───────────────┐
+│ AGNTCY    │       │  IdP         │       │  Resource     │
+│ Identity  │       │  - xaa.dev   │       │  Auth Server  │
+│ Node      │       │  - Okta      │       │  (Lightsail #2)│
+└───────────┘       └──────────────┘       └───────┬───────┘
+│
+┌─────────────────────┼─────────────┐
+▼                                   ▼
+┌─────────────────┐                  ┌──────────────┐
+│  Weather MCP    │                  │  Slack MCP   │
+│  (Open-Meteo)   │                  │  (Slack API) │
+└─────────────────┘                  └──────────────┘
 
-1. Sarah delegates task to OpenClaw agent
-2. Agent fetches AGNTCY badge from identity node
-   GET http://13.222.140.133:4000/v1alpha1/vc/AGNTCY-ffe62877.../.well-known/vcs.json
-3. Agent verifies badge cryptographically
-   POST http://13.222.140.133:4000/v1alpha1/vc/verify
-   → status: true 
-4. Agent requests ID-JAG from Okta
-   POST https://agntcydev1.oktapreview.com/oauth2/ausd9v0ra5BWoW1y40x7/v1/token
-   → scoped access token for weather:read
-5. TBAC middleware intercepts MCP tool call
-   → verifies badge capabilities match requested scopes
-   → verifies task == "weather_slack_notification"
-   → ALLOW 
-6. Weather MCP calls Open-Meteo API
-   GET https://api.open-meteo.com/v1/forecast?...
-   → returns weather data for Austin, TX
-7. TBAC middleware intercepts Slack MCP call
-   → same checks for slack:chat:write
-   → ALLOW 
-8. Slack MCP posts weather summary to #agent-weather-alerts
-   
-## Layers
+**Two-instance deployment:**
 
-### 1. AGNTCY Identity Badge
-- The agent obtains a verifiable identity badge from the AGNTCY Identity Service
-- Badge contains: agent_id, delegating user, issuer DID, signed JWT
-- Badge proves the agent is authorized to act on Sarah's behalf
+- **Lightsail #1** (`13.222.140.133`) — AGNTCY identity node (port 4000) + OpenClaw orchestrator + MCP servers
+- **Lightsail #2** (`18.233.200.161:5001`) — Resource authorization server (validates ID-JAGs, mints access tokens)
 
-### 2. Okta XAA — Identity Assertion Authorization Grant (ID-JAG)
-- Agent uses Okta's ID-JAG flow to obtain identity assertions, then exchanges them (with AGNTCY badge as actor proof) for scoped access tokens to target MCP servers
-- Each target domain (Open-Meteo, Slack) receives a scoped token
+## End-to-end flow (6 steps)
 
-### 3. TBAC Middleware (IdentityServiceMCPMiddleware)
-- Intercepts every MCP tool call before execution
-- Validates badge authenticity and expiration
-- Enforces scope alignment (requested ⊆ authorized)
-- Checks delegation chain integrity
-- Blocks scope escalation attempts
+1. **Badge fetch** — Orchestrator pulls Sarah's AGNTCY badge from the well-known endpoint
+2. **Badge verify** — Cryptographic signature verification against the AGNTCY identity node
+3. **ID-JAG request** — Orchestrator exchanges Sarah's ID token at the IdP (xaa.dev or Okta) for an ID-JAG (RFC 8693 token-exchange)
+4. **Access token request** — Orchestrator presents the ID-JAG to the resource auth server (RFC 7523 jwt-bearer grant) and receives a scoped access token
+5. **TBAC check** — `IdentityServiceMCPMiddleware` validates badge capabilities ⨯ requested scopes ⨯ task before any tool call
+6. **MCP fan-out** — Weather (Open-Meteo) + Slack (real bot token), with `sub` propagation in every log line for audit
 
-## xaa.dev Pivot (current demo path)
+## Two-layer enforcement
 
-While the production Okta tenant's XAA audience config update is pending
-vendor support, the PoC's XAA layer points at **xaa.dev** — Okta's
-official XAA playground — instead of the internal Okta tenant. xaa.dev
-speaks the same three-step XAA protocol (authorization_code →
-token-exchange (ID-JAG) → jwt-bearer grant), so only the endpoints and
-credentials change; Layers 1 (AGNTCY badge), 2b (tool scope assertion),
-5 (TBAC), and 6 (Slack + Open-Meteo) are unchanged.
+The PoC demonstrates **independent failure domains** for authorization:
 
-The legacy Okta path is preserved behind `USE_XAA_DEV=false` and will be
-re-enabled once the production tenant is updated.
+| Layer | Authority | Carries | Enforced at |
+|---|---|---|---|
+| Capability | AGNTCY identity node | Badge JWT (capabilities) | TBAC middleware |
+| Scope | IdP (xaa.dev or Okta) | Access token (OAuth scopes) | Resource auth server + middleware |
 
-### How to run against xaa.dev
+Compromise of one layer does not collapse the other. The badge says "this agent
+*may* do these things"; the access token says "this token *carries permission*
+to do these things at this resource." Both are required.
 
-1. **Register an app** at https://xaa.dev. You'll receive four
-   credentials: a main (IdP) client id + secret, and a resource client
-   id + secret (the resource client id has the shape
-   `{client_id}-at-res_{uuid}`).
-2. **Export env vars**:
-   ```bash
+## Path A: xaa.dev IdP
+
+### Setup
+
+1. **Register an app** at https://xaa.dev. You'll receive four credentials:
+   - Main (IdP) client ID + secret
+   - Resource client ID + secret (shape: `{client_id}-at-res_{uuid}`)
+
+2. **Configure the resource app** at xaa.dev:
+   - Resource Identifier URL: your resource auth server's audience identifier
+   - MCP scopes: `weather.read`, `slack.post.agent-weather-alerts`
+   - MCP Resource URIs and Tools as needed
+
+3. **Export env vars** (Lightsail #1):
+```bash
    export USE_XAA_DEV=true
    export XAA_CLIENT_ID=<main-client-id>
    export XAA_CLIENT_SECRET=<main-client-secret>
    export XAA_RESOURCE_CLIENT_ID=<resource-client-id>
    export XAA_RESOURCE_CLIENT_SECRET=<resource-client-secret>
    export XAA_RESOURCE_AUDIENCE=http://weather-slack-resources.com
-   # optional: XAA_IDP_URL, XAA_AUTH_SERVER_URL, XAA_REDIRECT_URI, XAA_SCOPE
-   ```
-3. **Obtain Sarah's ID token** via the interactive CLI helper (opens a
-   browser, captures the redirect at `localhost:8000`, prints the ID
-   token to stdout):
-   ```bash
-   export XAA_ID_TOKEN=$(python -m scripts.get_xaa_id_token 2>/dev/null)
-   ```
-4. **Run the orchestrator demo**:
-   ```bash
+   export SLACK_CHANNEL=agent-weather-alerts
+   export SLACK_BOT_TOKEN=<xoxb-...>
+```
+
+4. **Bootstrap Sarah's ID token**:
+```bash
+   export XAA_ID_TOKEN=$(python -m scripts.get_xaa_id_token)
+```
+
+5. **Run the demo**:
+```bash
    python -m agent.xaa_orchestrator --demo
-   ```
-
-Steps 3 + 4 of the flow now hit xaa.dev (`/token` twice — once for
-token-exchange, once for jwt-bearer). Step 6 MCP calls still use real
-Slack bot token + Open-Meteo's public REST API — the xaa.dev access
-token's role is to prove the cross-domain XAA flow completed; in
-production, that same token would be presented as the Bearer token to
-the protected resource API.
-
-## Project Structure
-
-```
-├── agent/                    # Agent orchestrator
-│   ├── openclaw_agent.py     # Main agent logic
-│   ├── task_context.py       # Delegation chain tracking
-│   └── config.py             # Configuration
-├── identity/                 # AGNTCY Identity layer
-│   ├── badge_issuer.py       # Badge issuance
-│   ├── badge_verifier.py     # Badge verification
-│   ├── okta_xaa.py           # Okta XAA token exchange (ID-JAG)
-│   └── secrets.py            # AWS Secrets Manager helpers
-├── middleware/                # TBAC enforcement
-│   └── agntcy_tbac.py        # IdentityServiceMCPMiddleware
-├── mcp_servers/               # MCP server clients
-│   ├── weather_mcp.py
-│   └── slack_mcp.py
-├── tests/                    # Test suite
-├── docker-compose.yml
-├── Dockerfile
-├── .env.example
-└── requirements.txt
 ```
 
-## Quick Start
+## Path B: Okta tenant IdP
 
 ### Prerequisites
-- Python 3.9+
-- Docker & Docker Compose (optional, for full stack)
-- Okta developer account (for XAA ID-JAG token exchange)
-- AGNTCY Identity Service instance
 
-### Local Development
+- Okta tenant with **Cross App Access (EA)** enabled
+- **Agent0** (Cross App Access Sample Requesting App) catalog app installed → represents the openclaw-agent
+- **Todo0** (Cross App Access Sample Resource App) catalog app installed → represents the resource (weather-slack-resources)
+- Test user assigned to both apps
+- Manage Connections established bidirectionally on both apps ("App granted consent" + "Apps providing consent")
+
+### Setup
+
+1. **Configure Okta apps:**
+   - Agent0 redirect URI: `http://localhost:8080/callback`
+   - Todo0 redirect URI: `http://localhost:5001/openid/callback/customer1`
+
+2. **Configure the resource auth server** (Lightsail #2 — `resource-auth-server/.env`):
+OKTA_ISSUER=https://<your-tenant>.oktapreview.com
+RESOURCE_AUDIENCE=http://localhost:5001
+REGISTERED_CLIENT_ID=wiki0-at-todo0
+LOCAL_SIGNING_KEY=<random-secret>
+ACCESS_TOKEN_TTL=3600
+   Restart: `sudo systemctl restart resource-auth-server.service`
+
+3. **Export env vars** (Lightsail #1):
+```bash
+   export USE_XAA_DEV=false
+   export OKTA_DOMAIN=<your-tenant>.oktapreview.com
+   export ORG2_DOMAIN=<your-tenant>.oktapreview.com
+   export OKTA_CLIENT_ID=<Agent0 client id>
+   export OKTA_CLIENT_SECRET=<Agent0 client secret>
+   export WEATHER_AUDIENCE=http://localhost:5001
+   export SLACK_AUDIENCE=http://localhost:5001
+   export RESOURCE_AUTH_CLIENT_ID=wiki0-at-todo0
+   export DELEGATING_USER=<your-test-user>@example.com
+   export SLACK_CHANNEL=agent-weather-alerts
+   export SLACK_BOT_TOKEN=<xoxb-...>
+```
+
+4. **Bootstrap Sarah's ID token** (Authorization Code + PKCE against Okta org auth server):
+```bash
+   sudo lsof -ti:8080 | xargs -r sudo kill -9 2>/dev/null
+   python -m scripts.get_okta_sarah_token
+   export SARAH_ACCESS_TOKEN="<paste eyJ... JWT>"
+```
+
+5. **Run the demo**:
+```bash
+   python -m agent.xaa_orchestrator --demo
+```
+
+### Path B caveats
+
+The PoC currently uses Okta's catalog Todo0 placeholder defaults rather than
+custom-registered audience and client_id values. This is because the
+tenant-side audience override (managed by Okta's XAA team) is pending. As a
+result:
+
+- **Audience claim** in the ID-JAG is `http://localhost:5001` (the Todo0 catalog
+  default), not the resource auth server's actual public URL. The resource auth
+  server is configured to accept this audience to complete the flow.
+- **Client identity** in the ID-JAG is `wiki0-at-todo0` (Okta's catalog-baked
+  resource-side client identifier for the Agent0→Todo0 sample pair), not
+  openclaw-agent's name.
+
+The **cryptographic trust chain is intact** (Okta signs, resource auth server
+verifies against Okta's JWKS, audience matching enforced). The placeholder
+labels are a documented limitation of using catalog placeholder apps and would
+be replaced with real values via Okta XAA team configuration in a production
+deployment.
+
+## Project Structure
+├── agent/
+│   ├── xaa_orchestrator.py     # 6-step XAA flow orchestrator
+│   ├── config.py               # AgentConfig (env var loader)
+│   └── ...
+├── identity/
+│   ├── badge_issuer.py         # AGNTCY badge fetch
+│   ├── badge_verifier.py       # AGNTCY badge verification
+│   ├── okta_xaa.py             # Okta token-exchange (Path B)
+│   ├── xaa_dev_client.py       # xaa.dev token-exchange (Path A)
+│   └── resource_exchange.py    # ID-JAG → access token at resource auth server
+├── middleware/
+│   └── agntcy_tbac.py          # TBAC enforcement (badge ⨯ scope)
+├── mcp_servers/
+│   ├── weather_mcp.py
+│   └── slack_mcp.py
+├── resource-auth-server/        # Standalone auth server (Lightsail #2)
+│   └── main.py                  # Validates ID-JAGs, mints access tokens
+├── scripts/
+│   ├── get_xaa_id_token.py      # Sarah's ID token bootstrap (xaa.dev)
+│   └── get_okta_sarah_token.py  # Sarah's ID token bootstrap (Okta)
+├── tests/
+└── requirements.txt
+
+## Demo runbook
+
+For a clean demo run:
 
 ```bash
-# Clone and enter the repo
-cd xdomain-openclaw-agntcy-poc
+# 1. SSH from local with port forward (for browser auth callback)
+ssh -L 8080:localhost:8080 -i <key.pem> ubuntu@13.222.140.133
 
-# Create virtual environment
-python -m venv .venv
+# 2. On Lightsail #1
+cd ~/xdomain-openclaw-agntcy-poc
 source .venv/bin/activate
+source ~/lightsail-env-pathB.sh   # (or pathA equivalent)
 
-# Install dependencies
-pip install -r requirements.txt
+# 3. Free port 8080
+sudo lsof -ti:8080 | xargs -r sudo kill -9 2>/dev/null
 
-# Copy and configure environment
-cp .env.example .env
-# Edit .env with your credentials
+# 4. Bootstrap fresh ID token (1-hour expiry)
+python -m scripts.get_okta_sarah_token   # or get_xaa_id_token for Path A
+export SARAH_ACCESS_TOKEN="<paste JWT>"  # or XAA_ID_TOKEN
 
-# Run tests
-pytest tests/ -v
-
-# Run the agent
-python -m agent.openclaw_agent
+# 5. Run
+python -m agent.xaa_orchestrator --demo 2>&1 | tee demo-run.log
 ```
 
-### Docker Compose
+## Resource API enforcement (open work)
 
-```bash
-# Copy and configure environment
-cp .env.example .env
+Open-Meteo and Slack are **not XAA-enabled** in this PoC — the access token
+is enforced at the orchestrator/MCP middleware layer rather than at the
+resource API itself. This is documented as a scoping decision: the contribution
+of this PoC is the agent trust boundary (badge + scope) up to the access
+token. Closing the last hop would require either:
 
-# Start all services
-docker-compose up --build
-
-# Run tests in container
-docker-compose run openclaw-agent pytest tests/ -v
-```
-
-## Auth Flow
-
-1. **Sarah** delegates a task to the OpenClaw agent
-2. **Agent** requests an identity badge from AGNTCY Identity Service (well-known endpoint)
-3. For each MCP server (Weather, Slack):
-   - **Agent** requests ID-JAG from Okta (client_credentials)
-   - **Agent** exchanges ID-JAG + badge JWT for scoped access token (ID-JAG grant)
-   - **TBAC middleware** validates badge + scopes
-   - **MCP server** receives the scoped token and executes the tool call
-4. **Agent** aggregates results and returns them to Sarah
-
-> All credentials (Okta, AGNTCY badge, Slack) are loaded from AWS Secrets Manager at runtime.
-
-## Delegation Chain Example
-
-```
-Sarah (human)
-  └─▶ OpenClaw Agent [badge: badge-openclaw-agent-001]
-        ├─▶ Weather MCP [xaa-token: api.open-meteo.com, scopes: weather:read]
-        └─▶ Slack MCP [xaa-token: slack.com, scopes: slack:chat:write]
-```
+- A mock XAA-enabled resource service (e.g., Auth0's XAA resource Beta), or
+- Native XAA support in the target API
 
 ## License
 
