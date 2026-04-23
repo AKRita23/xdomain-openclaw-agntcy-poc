@@ -2,7 +2,7 @@
 
 > OpenClaw agent executing cross-domain tasks on behalf of a human user (Sarah),
 > with capability attestation via AGNTCY Identity badges, OAuth scope enforcement
-> via XAA-issued access tokens, and Task-Based Access Control (TBAC) at the
+> via XAA-issued access tokens, and Task(Tool)-Based Access Control (TBAC) at the
 > orchestrator middleware layer.
 
 The PoC supports **two interchangeable IdP backends** for the XAA flow:
