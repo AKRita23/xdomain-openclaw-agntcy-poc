@@ -1,7 +1,7 @@
 # Cross-Domain Agent Identity PoC — AGNTCY + XAA
 
 > OpenClaw agent executing cross-domain tasks on behalf of a human user (Sarah),
-> with capability attestation via AGNTCY Identity badges(CIMD+VC), OAuth scope enforcement
+> with capability attestation via AGNTCY Identity badges(DID+VC), OAuth scope enforcement
 > via XAA-issued access tokens, and Task(Tool)-Based Access Control (TBAC) at the
 > orchestrator middleware layer.
 
