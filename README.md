@@ -1,33 +1,36 @@
-# Cross-Domain Agent Identity PoC — AGNTCY + XAA
+# Cross-Domain Agent Identity PoC
 
-> OpenClaw agent executing cross-domain tasks on behalf of a human user (Sarah),
-> with capability attestation via AGNTCY Identity badges(DID+VC), OAuth scope enforcement
-> via XAA-issued access tokens, and Task(Tool)-Based Access Control (TBAC) at the
-> orchestrator middleware layer.
+> A working proof-of-concept for cross-domain AI agent identity, combining **AGNTCY identity attestation** (W3C Verifiable Credentials) with **Cross App Access** (RFC 8693 token exchange / IETF ID-JAG). 
 
-The PoC supports **two interchangeable IdP backends** for the XAA flow:
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-- **Path A — xaa.dev IdP** (Okta's official XAA playground)
-- **Path B — Okta tenant IdP** (production-style enterprise governance)
+---
 
-Both paths use identical orchestrator code; only env vars and credentials change.
+## What This Demonstrates
+
+An OpenClaw agent performs cross-domain tasks (read weather, post to a specific Slack channel) on behalf of a delegating user (Sarah), with two layers of trust:
+
+**Capability layer** — AGNTCY-issued W3C Verifiable Credential (badge) attests the agent's identity and capabilities, signed and cryptographically verified
+**Scope layer** — IETF Identity Assertion JWT Authorization Grant (ID-JAG, Okta XAA) issues scoped access tokens via the enterprise IdP, validated at a self-hosted resource authorization server
+
+Both layers enforced independently. Channel-bound scopes (`slack.post.agent-weather-alerts`, not `slack.post`). Subject propagation end-to-end for audit. This was tested on XAA.dev and an Okta XAA preview environment.
 
 ## Architecture
 <img width="971" height="681" alt="Screenshot 2026-04-22 at 9 21 31 PM" src="https://github.com/user-attachments/assets/c65135d5-0a50-48bf-b82e-203ec415fcfd" />
 
+## End-to-End Flow (6 Steps)
+
+1. **Badge fetch** — Orchestrator fetches the AGNTCY badge (W3C VC, JWT-encoded) from the identity node's well-known endpoint
+2. **Badge verify** — Orchestrator verifies the badge cryptographically against the AGNTCY identity node
+3. **ID-JAG exchange** — Orchestrator exchanges Sarah's IdP ID token for an ID-JAG via RFC 8693 token exchange. The AGNTCY badge is sent as `actor_token`. *(See "Empirical Findings" below for what this proves.)*
+4. **Access token mint** — Resource authorization server validates the ID-JAG against IdP JWKS, mints a scoped access token bound to the agent and requested scopes
+5. **TBAC enforcement** — Middleware re-verifies the badge, checks badge capability ⨯ requested scope alignment, validates target domain authorization. ALLOW or DENY before tool dispatch.
+6. **Tool execution** — MCP layer dispatches authorized tool calls (weather read + Slack post). Subject claim from access token propagates into every tool invocation for audit.
+
 **Two-instance deployment:**
 
-- **Lightsail #1**  — AGNTCY identity node (port 4000) + OpenClaw orchestrator + MCP servers
+- **Lightsail #1**  — AGNTCY identity node (port 4000) + OpenClaw orchestrator 
 - **Lightsail #2**  — Resource authorization server (validates ID-JAGs, mints access tokens)
-
-## End-to-end flow (6 steps)
-
-1. **Badge fetch** — Orchestrator pulls Sarah's AGNTCY badge from the well-known endpoint
-2. **Badge verify** — Cryptographic signature verification against the AGNTCY identity node
-3. **ID-JAG request** — Orchestrator exchanges Sarah's ID token at the IdP (xaa.dev or Okta) for an ID-JAG (RFC 8693 token-exchange)
-4. **Access token request** — Orchestrator presents the ID-JAG to the resource auth server (RFC 7523 jwt-bearer grant) and receives a scoped access token
-5. **TBAC check** — `IdentityServiceMCPMiddleware` validates badge capabilities ⨯ requested scopes ⨯ task before any tool call
-6. **MCP fan-out** — Weather (Open-Meteo) + Slack (real bot token), with `sub` propagation in every log line for audit
 
 ## Two-layer enforcement
 
@@ -139,8 +142,7 @@ result:
   default), not the resource auth server's actual public URL. The resource auth
   server is configured to accept this audience to complete the flow.
 - **Client identity** in the ID-JAG is `wiki0-at-todo0` (Okta's catalog-baked
-  resource-side client identifier for the Agent0→Todo0 sample pair), not
-  openclaw-agent's name.
+  resource-side client identifier for the Agent0→Todo0 sample pair), not openclaw-agent's name.
 
 The **cryptographic trust chain is intact** (Okta signs, resource auth server
 verifies against Okta's JWKS, audience matching enforced). The placeholder
@@ -175,8 +177,7 @@ deployment.
 Open-Meteo and Slack are **not XAA-enabled** in this PoC — the access token
 is enforced at the orchestrator/MCP middleware layer rather than at the
 resource API itself. This is documented as a scoping decision: the contribution
-of this PoC is the agent trust boundary (badge + scope) up to the access
-token. Closing the last hop would require either:
+of this PoC is the agent trust boundary (badge + scope) up to the access token. Closing the last hop would require either:
 
 - A mock XAA-enabled resource service (e.g., Auth0's XAA resource Beta), or
 - Native XAA support in the target API
