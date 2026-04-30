@@ -12,9 +12,10 @@ An OpenClaw agent performs cross-domain tasks (read weather, post to a specific 
 
 **Capability layer** — AGNTCY-issued W3C Verifiable Credential (badge) attests the agent's identity and capabilities, signed and cryptographically verifie.
 
-**Scope layer** — IETF Identity Assertion JWT Authorization Grant (ID-JAG, Okta XAA) issues scoped access tokens via the enterprise IdP, validated at a self-hosted resource authorization server
+**Scope layer** — IETF Identity Assertion JWT Authorization Grant (ID-JAG, Okta XAA) issues scoped access tokens via the enterprise IdP, validated at a self-hosted resource authorization server. 
 
-Both layers enforced independently. Channel-bound scopes (`slack.post.agent-weather-alerts`, not `slack.post`). Subject propagation end-to-end for audit. This was tested on XAA.dev and an Okta XAA preview environment.
+Both layers enforced independently. Channel-bound scopes (`slack.post.agent-weather-alerts`, not `slack.post`). Subject propagation end-to-end for audit. Same orchestrator code runs against two different IdPs.
+
 ---
 ## Architecture
 <img width="971" height="681" alt="Screenshot 2026-04-22 at 9 21 31 PM" src="https://github.com/user-attachments/assets/c65135d5-0a50-48bf-b82e-203ec415fcfd" />
