@@ -153,8 +153,13 @@ async def test_full_flow_runs_all_six_steps_in_order(orchestrator, badge, access
     assert issue_kwargs["delegating_user"] == "sarah@example.com"
     assert issue_kwargs["task_scopes"] == ["weather:read"]
 
-    # Step 2 — verifier received the exact badge from step 1
-    orchestrator.badge_verifier.verify_badge.assert_awaited_once_with(badge)
+    # Step 2 — verifier received the exact badge from step 1 with the
+    # identity-binding kwargs threaded through (Phase-1 fix #4).
+    orchestrator.badge_verifier.verify_badge.assert_awaited_once()
+    v_call = orchestrator.badge_verifier.verify_badge.await_args
+    assert v_call.args[0] == badge
+    assert v_call.kwargs["expected_agent_id"] == orchestrator.config.agent_id
+    assert v_call.kwargs["expected_user"] == "sarah@example.com"
 
     # Step 3 — Okta exchange carried the badge JWT through
     orchestrator.xaa_client.exchange_token.assert_awaited_once()
@@ -467,11 +472,25 @@ async def test_xaa_dev_path_runs_token_exchange_and_jwt_bearer(
         subject="sarah@example.com",
     )
 
-    # Steps 3 + 4: both xaa.dev endpoints invoked, Okta client untouched
+    # Steps 3 + 4: both xaa.dev endpoints invoked, Okta client untouched.
+    # Phase-1 fix #5: the badge JWT is forwarded as actor_token, the
+    # requested scope is forwarded for IdP consumption.
     xaa_dev_orchestrator.xaa_dev_client.exchange_id_token_for_id_jag \
-        .assert_awaited_once_with("sarah.id.token")
+        .assert_awaited_once()
+    ex_call = (
+        xaa_dev_orchestrator.xaa_dev_client.exchange_id_token_for_id_jag
+        .await_args
+    )
+    assert ex_call.args == ("sarah.id.token",)
+    assert ex_call.kwargs["actor_token"] == badge["jwt"]
+    assert ex_call.kwargs["scope"] == "weather:read"
     xaa_dev_orchestrator.xaa_dev_client.exchange_id_jag_for_access_token \
-        .assert_awaited_once_with("xaa.dev.id-jag")
+        .assert_awaited_once()
+    jb_call = (
+        xaa_dev_orchestrator.xaa_dev_client.exchange_id_jag_for_access_token
+        .await_args
+    )
+    assert jb_call.args == ("xaa.dev.id-jag",)
     xaa_dev_orchestrator.xaa_client.exchange_token.assert_not_called()
 
     # Step 6: MCP call uses the xaa.dev access token
@@ -579,7 +598,7 @@ def test_demo_subject_and_audience_read_from_env(monkeypatch):
     assert captured["subject"] == "customdemo@agentex.io"
     assert captured["target_audience"] == "http://my-res.example/"
     assert captured["task_name"] == "weather_slack_notification"
-    assert captured["scopes"] == ["weather:read"]
+    assert captured["scopes"] == ["weather.read", "slack.post.agent-weather-alerts"]
 
 
 def test_demo_subject_falls_back_to_default_when_env_unset(monkeypatch):

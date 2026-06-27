@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
 import httpx
+import jwt
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 ID_JAG_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id-jag"
 ID_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id_token"
+JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
 
 
@@ -143,8 +145,16 @@ class XAADevClient:
 
     async def exchange_id_token_for_id_jag(
         self, id_token: str, scope: str = "",
+        actor_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Step 2 — token-exchange the ID token for an ID-JAG assertion."""
+        """Step 2 — token-exchange the ID token for an ID-JAG assertion.
+
+        When ``actor_token`` is supplied (typically the AGNTCY badge JWT),
+        it is included per RFC 8693 §2.1 as the delegation actor. The
+        returned ID-JAG is decoded and the presence/absence of the
+        ``act`` claim is logged so the "does xaa.dev echo a delegation
+        chain?" observation is reproducible from log output.
+        """
         url = f"{self.config.idp_url}/token"
         form = {
             "grant_type": TOKEN_EXCHANGE_GRANT,
@@ -158,11 +168,24 @@ class XAADevClient:
         }
         if scope:
             form["scope"] = scope
+        # Phase-1 fix #5: parity with okta_xaa.py — wire AGNTCY badge as
+        # actor_token so the IdP can record agent delegation.
+        if actor_token:
+            form["actor_token"] = actor_token
+            form["actor_token_type"] = JWT_TOKEN_TYPE
         logger.info(
-            "[xaa.dev] Step 2: POST %s grant=token-exchange audience=%s resource=%s scope=%s",
-            url, self.config.auth_server_url, self.config.resource_audience, scope,
+            "[xaa.dev] Step 2: POST %s grant=token-exchange audience=%s "
+            "resource=%s scope=%s actor_token=%s",
+            url, self.config.auth_server_url, self.config.resource_audience,
+            scope, "<badge_jwt>" if actor_token else "<absent>",
         )
-        return await self._post_form(url, form)
+        response = await self._post_form(url, form)
+        _log_act_claim_presence(
+            label="xaa.dev ID-JAG",
+            token=response.get("access_token", ""),
+            actor_token_was_sent=bool(actor_token),
+        )
+        return response
 
     async def exchange_id_jag_for_access_token(
         self, id_jag: str, scope: str = "",
@@ -236,3 +259,44 @@ class XAADevClient:
                 response_body=resp.text,
                 request_url=url,
             ) from exc
+
+
+def _log_act_claim_presence(
+    label: str, token: str, actor_token_was_sent: bool,
+) -> None:
+    """Decode an ID-JAG (no signature check) and log whether ``act`` is present.
+
+    Phase-1 fix #5 parity with :mod:`identity.okta_xaa`. Reproducible
+    observation: did the IdP echo a delegation chain when we supplied an
+    actor_token? One INFO line per call so the answer is greppable.
+    """
+    if not token:
+        logger.info(
+            "[%s] act-claim observation: cannot decode (empty token); "
+            "actor_token sent=%s",
+            label, actor_token_was_sent,
+        )
+        return
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.exceptions.DecodeError as exc:
+        logger.info(
+            "[%s] act-claim observation: token is opaque/undecodable (%s); "
+            "actor_token sent=%s",
+            label, exc, actor_token_was_sent,
+        )
+        return
+
+    act = claims.get("act")
+    if act is None:
+        logger.info(
+            "[%s] act-claim observation: act claim ABSENT in issued token; "
+            "actor_token sent=%s",
+            label, actor_token_was_sent,
+        )
+    else:
+        logger.info(
+            "[%s] act-claim observation: act claim PRESENT (%s); "
+            "actor_token sent=%s",
+            label, act, actor_token_was_sent,
+        )
