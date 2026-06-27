@@ -285,30 +285,84 @@ async def _fetch_vcs_list(
 async def fetch_first_vc_jwt(
     node_url: str, metadata_id: str,
     envelope_type: str = BadgeVerifier.ENVELOPE_TYPE,
+    expected_agent_id: Optional[str] = None,
 ) -> str:
-    """Return the first VC JWT whose envelope matches ``envelope_type``.
+    """Return the VC JWT for the requested agent at the well-known endpoint.
 
     Public helper for callers that need just the badge JWT (e.g. the CIMD
     document builder) without running it through the Identity Node
     verifier first. Reuses :func:`_fetch_vcs_list` so the well-known URL
     pattern is defined in exactly one place.
 
-    Raises ``LookupError`` if the well-known endpoint has no matching VC,
-    or the underlying transport error (via :class:`_WellKnownError`)
-    surfaces.
+    Selection policy:
+      * When ``expected_agent_id`` is provided, the returned VC is the
+        first one whose envelope matches and whose UNVERIFIED JWT
+        payload's ``agent_id`` claim equals ``expected_agent_id``. This
+        is a deliberate lightweight selector, not a trust gate — the
+        AGNTCY-signed identity check still runs downstream in
+        :meth:`BadgeVerifier.verify_badge` (Phase-1 fix #4).
+      * When ``expected_agent_id`` is ``None``, the legacy first-by-
+        envelope-type behavior is preserved AND a warning is logged if
+        the well-known carries more than one matching VC, since the
+        choice is then arbitrary and the caller has no way to bind to
+        an identity.
+
+    Raises ``LookupError`` if no VC matches (envelope and, when
+    requested, ``expected_agent_id``). Transport errors surface as
+    :class:`_WellKnownError`.
     """
     async with httpx.AsyncClient(timeout=30.0) as client:
         vcs_list = await _fetch_vcs_list(client, node_url, metadata_id)
-    for vc in vcs_list:
-        if vc.get("envelopeType") != envelope_type:
-            continue
-        value = vc.get("value", "")
-        if value:
-            return value
+
+    matching_envelope: List[str] = [
+        vc.get("value", "")
+        for vc in vcs_list
+        if vc.get("envelopeType") == envelope_type and vc.get("value")
+    ]
+    if not matching_envelope:
+        raise LookupError(
+            f"no VC with envelopeType={envelope_type!r} at "
+            f"{_well_known_url(node_url, metadata_id)}"
+        )
+
+    if expected_agent_id is None:
+        if len(matching_envelope) > 1:
+            logger.warning(
+                "well-known at %s has %d VCs with envelopeType=%s and "
+                "no expected_agent_id was supplied; returning the first "
+                "arbitrarily — pass expected_agent_id to disambiguate.",
+                _well_known_url(node_url, metadata_id),
+                len(matching_envelope), envelope_type,
+            )
+        return matching_envelope[0]
+
+    for vc_jwt in matching_envelope:
+        if _unverified_jwt_agent_id(vc_jwt) == expected_agent_id:
+            return vc_jwt
+
     raise LookupError(
-        f"no VC with envelopeType={envelope_type!r} at "
-        f"{_well_known_url(node_url, metadata_id)}"
+        f"no VC at {_well_known_url(node_url, metadata_id)} has "
+        f"envelopeType={envelope_type!r} and agent_id={expected_agent_id!r} "
+        f"(found {len(matching_envelope)} envelope match(es), none with "
+        f"the requested agent_id)"
     )
+
+
+def _unverified_jwt_agent_id(token: str) -> str:
+    """Best-effort extract of ``agent_id`` from a VC JWT's unverified payload.
+
+    Returns ``""`` on any decode failure — caller treats that as
+    "doesn't match" and skips the VC. NO trust decision is based on this
+    value; it's only used as a selector among multiple VCs published at
+    the same well-known URL. The cryptographic check is downstream.
+    """
+    try:
+        claims = jwt.decode(
+            token, options={"verify_signature": False, "verify_exp": False},
+        )
+    except jwt.exceptions.DecodeError:
+        return ""
+    return str(claims.get("agent_id", ""))
 
 
 def _check_jwt_exp(token: str) -> Dict[str, Any]:

@@ -128,8 +128,20 @@ async def build_cimd_document_from_agntcy(
     the same VC JWT that :class:`BadgeVerifier` consumes, so the CIMD
     projection and the standalone badge-verify path provably reference
     the same artifact. The "no new registry" promise depends on this.
+
+    Multi-VC safety: ``spec.agent_id`` is passed as
+    ``expected_agent_id`` so a well-known endpoint hosting badges for
+    multiple agents under the same ``metadata_id`` returns the badge
+    the CIMD document is being built FOR. The selector is unverified
+    (lightweight disambiguation); the resolver's downstream
+    cryptographic check still binds the badge's verified content to
+    the document's declared identity.
     """
-    badge_jwt = await fetch_first_vc_jwt(agntcy_node_url, agntcy_metadata_id)
+    badge_jwt = await fetch_first_vc_jwt(
+        agntcy_node_url,
+        agntcy_metadata_id,
+        expected_agent_id=spec.agent_id,
+    )
     return build_cimd_document(spec, badge_jwt)
 
 

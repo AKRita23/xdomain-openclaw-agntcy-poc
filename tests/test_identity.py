@@ -158,7 +158,11 @@ async def test_verify_jwks_unavailable(verifier):
 
 
 def test_okta_client_token_endpoint(xaa_client):
-    assert xaa_client.token_endpoint == "https://dev-test.okta.com/oauth2/default/v1/token"
+    # Path-B refactor (commit 2739b1e) moved the token endpoint to Okta's
+    # org auth server (/oauth2/v1/token) so the ID-JAG flow uses the
+    # tenant's CrossAppAccess-enabled root endpoint rather than a
+    # per-app auth-server URL.
+    assert xaa_client.token_endpoint == "https://dev-test.okta.com/oauth2/v1/token"
 
 
 def test_validate_token_response_rejects_missing_access_token():
@@ -196,40 +200,88 @@ def test_validate_token_response_accepts_opaque_token():
     )
 
 
+@pytest.fixture
+def xaa_client_for_weather():
+    """OktaXAAClient configured for the weather audience.
+
+    The Path-B refactor (commit 2739b1e) made ``exchange_token`` resolve
+    the Org-2 audience via ``_resolve_org2_target``, which requires the
+    client to know either the scope-to-resource mapping or an explicit
+    weather audience. The default ``xaa_client`` fixture above leaves
+    these blank for the unit tests that don't exercise the full flow;
+    this fixture wires them in for the round-trip test below.
+    """
+    return OktaXAAClient(
+        domain="dev-test.okta.com",
+        client_id="test-client-id",
+        client_secret="test-client-secret",
+        org2_domain="dev-test.okta.com",
+        weather_auth_server_id="ausweather",
+        weather_audience="http://localhost:5001",
+    )
+
+
 @pytest.mark.asyncio
-async def test_okta_id_jag_exchange_success(xaa_client):
-    """ID-JAG flow: first POST returns id_jag JWT, second returns access_token."""
+async def test_okta_id_jag_exchange_success(xaa_client_for_weather, monkeypatch):
+    """Post-Path-B contract: ``exchange_token`` POSTs Sarah's ID token to
+    Okta's org token endpoint and returns the ID-JAG. The resource auth
+    server (a separate module) is what mints the scoped access token
+    from that ID-JAG — not exercised here.
+    """
+    # SARAH_ACCESS_TOKEN avoids the AWS Secrets Manager path in load_sarah_token.
+    monkeypatch.setenv("SARAH_ACCESS_TOKEN", "sarah-id-token-jwt")
+
     id_jag_response = MagicMock()
     id_jag_response.status_code = 200
     id_jag_response.json.return_value = {
         "access_token": "id-jag-assertion-jwt",
+        "issued_token_type": "urn:ietf:params:oauth:token-type:id-jag",
         "token_type": "Bearer",
         "expires_in": 300,
     }
 
-    token_response = MagicMock()
-    token_response.status_code = 200
-    token_response.json.return_value = {
-        "access_token": "scoped-access-token",
-        "token_type": "Bearer",
-        "expires_in": 3600,
-    }
+    captured: dict = {}
 
-    with patch("identity.okta_xaa.httpx.AsyncClient") as mock_client_cls, \
+    class _FakeAsyncClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        async def post(self, url, data=None):
+            captured["url"] = url
+            captured["data"] = dict(data or {})
+            return id_jag_response
+
+    with patch("identity.okta_xaa.httpx.AsyncClient", _FakeAsyncClient), \
          patch.object(OktaXAAClient, "_validate_token_response"):
-        mock_client = AsyncMock()
-        mock_client.post.side_effect = [id_jag_response, token_response]
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client
-
-        result = await xaa_client.exchange_token(
-            subject_token="badge-jwt",
-            target_audience="api.open-meteo.com",
-            scopes=["weather:read"],
-            badge_jwt="badge-jwt",
+        result = await xaa_client_for_weather.exchange_token(
+            subject_token="ignored",  # current impl uses load_sarah_token()
+            target_audience="http://localhost:5001",
+            scopes=["weather.read"],
+            badge_jwt="badge-jwt-value",
         )
-    assert result["access_token"] == "scoped-access-token"
+
+    # Single POST to Okta's org token endpoint, ID-JAG returned.
+    assert result["access_token"] == "id-jag-assertion-jwt"
+    assert (
+        result["issued_token_type"]
+        == "urn:ietf:params:oauth:token-type:id-jag"
+    )
+    assert captured["url"] == "https://dev-test.okta.com/oauth2/v1/token"
+    # Phase-1 fix #5: badge_jwt is wired through as actor_token + actor_token_type.
+    assert captured["data"]["actor_token"] == "badge-jwt-value"
+    assert (
+        captured["data"]["actor_token_type"]
+        == "urn:ietf:params:oauth:token-type:jwt"
+    )
+    # And as token-exchange parameters
+    assert (
+        captured["data"]["grant_type"]
+        == "urn:ietf:params:oauth:grant-type:token-exchange"
+    )
+    assert (
+        captured["data"]["requested_token_type"]
+        == "urn:ietf:params:oauth:token-type:id-jag"
+    )
+    assert captured["data"]["subject_token"] == "sarah-id-token-jwt"
 
 
 @pytest.mark.asyncio

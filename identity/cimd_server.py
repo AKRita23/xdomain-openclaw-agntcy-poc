@@ -35,6 +35,21 @@ The set of {metadata_id → declared identity} is intentionally
 single-tenant in this PoC — one agent per CIMD-server instance. A
 multi-tenant deployment would key the declared identity off
 ``metadata_id`` instead of process-wide env vars; out of scope here.
+
+Operator workflow note — independence of identity sources:
+  The resolver compares the document's declared agent_id/
+  delegating_user against the badge's AGNTCY-signed agent_id/
+  delegating_user. These two sources MUST be independently sourced
+  for the check to be meaningful. In practice:
+    * AGENT_DECLARED_ID / AGENT_DECLARED_USER come from the agent's
+      OWN identity records — the same source AGNTCY used at badge
+      issuance time.
+    * They MUST NOT be derived by decoding the badge JWT and copying
+      its claims back into the env vars; doing so collapses the two
+      sources into one and makes the resolver's check tautological.
+  This is an operator-level concern; the code does the right thing
+  regardless of env-var sourcing, but the security guarantee comes
+  from getting the env vars right at deploy.
 """
 from __future__ import annotations
 

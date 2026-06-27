@@ -52,6 +52,18 @@ SELF_URL = "https://cimd.test/.well-known/cimd/AGNTCY-abc"
 JWKS_URI = "http://identity.test/v1alpha1/issuer/openclaw/.well-known/jwks.json"
 
 
+def _b64_jwt(claims: dict) -> str:
+    """Build an unsigned JWT carrying the supplied claims (test helper)."""
+    import base64
+
+    def _enc(value):
+        return base64.urlsafe_b64encode(
+            json.dumps(value).encode()
+        ).rstrip(b"=").decode()
+
+    return f"{_enc({'alg': 'RS256', 'typ': 'JWT'})}.{_enc(claims)}.sig"
+
+
 def _fresh_iso() -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 
@@ -288,6 +300,11 @@ def test_cimd_server_serves_self_consistent_document(monkeypatch):
     monkeypatch.setenv("AGENT_DECLARED_ID", AGENT_ID)
     monkeypatch.setenv("AGENT_DECLARED_USER", DELEGATING_USER)
 
+    # Use a JWT whose unverified payload carries the expected agent_id so
+    # the multi-VC selector picks it. (FAKE_BADGE_JWT is a non-decodable
+    # 3-segment string used elsewhere where selection isn't exercised.)
+    badge_jwt = _b64_jwt({"agent_id": AGENT_ID, "sub": "sarah"})
+
     well_known = (
         "http://identity.test/v1alpha1/vc/AGNTCY-abc/.well-known/vcs.json"
     )
@@ -296,7 +313,7 @@ def test_cimd_server_serves_self_consistent_document(monkeypatch):
         respx.get(well_known).mock(return_value=httpx.Response(200, json={
             "vcs": [{
                 "envelopeType": "CREDENTIAL_ENVELOPE_TYPE_JOSE",
-                "value": FAKE_BADGE_JWT,
+                "value": badge_jwt,
             }],
         }))
         client = TestClient(create_app())
@@ -306,9 +323,71 @@ def test_cimd_server_serves_self_consistent_document(monkeypatch):
     body = resp.json()
     # Self-reference: client_id matches the URL the test client fetched.
     assert body["client_id"] == "http://cimd.test/.well-known/cimd/AGNTCY-abc"
-    assert body[VC_JWT_FIELD] == FAKE_BADGE_JWT
+    assert body[VC_JWT_FIELD] == badge_jwt
     assert body["agent_id"] == AGENT_ID
     assert body["delegating_user"] == DELEGATING_USER
+
+
+def test_cimd_server_picks_correct_vc_when_well_known_has_multiple(
+    monkeypatch,
+):
+    """Phase-2 multi-VC tightening: a well-known endpoint hosting badges
+    for multiple agents under the same metadata_id must yield the badge
+    for the agent the CIMD doc is being built for, not whichever VC is
+    listed first.
+    """
+    other_agent_jwt = _b64_jwt({"agent_id": "some-other-agent"})
+    target_jwt = _b64_jwt({"agent_id": AGENT_ID})
+
+    monkeypatch.setenv("CIMD_BASE_URL", "http://cimd.test")
+    monkeypatch.setenv("AGNTCY_NODE_URL", "http://identity.test")
+    monkeypatch.setenv("AGNTCY_ISSUER_JWKS_URI", JWKS_URI)
+    monkeypatch.setenv("AGENT_CLIENT_NAME", "OpenClaw Cross-Domain Agent")
+    monkeypatch.setenv("AGENT_DECLARED_ID", AGENT_ID)
+    monkeypatch.setenv("AGENT_DECLARED_USER", DELEGATING_USER)
+
+    well_known = (
+        "http://identity.test/v1alpha1/vc/AGNTCY-abc/.well-known/vcs.json"
+    )
+    with respx.mock:
+        respx.get(well_known).mock(return_value=httpx.Response(200, json={
+            "vcs": [
+                # First-by-position is for a DIFFERENT agent — must NOT be picked.
+                {"envelopeType": "CREDENTIAL_ENVELOPE_TYPE_JOSE",
+                 "value": other_agent_jwt},
+                {"envelopeType": "CREDENTIAL_ENVELOPE_TYPE_JOSE",
+                 "value": target_jwt},
+            ],
+        }))
+        client = TestClient(create_app())
+        resp = client.get("/.well-known/cimd/AGNTCY-abc")
+
+    assert resp.status_code == 200
+    assert resp.json()[VC_JWT_FIELD] == target_jwt
+
+
+@pytest.mark.asyncio
+async def test_fetch_first_vc_jwt_raises_when_no_vc_matches_agent_id():
+    """If no VC matches the expected agent_id, raise LookupError — never
+    silently fall back to the first envelope match (that's the blind-trust
+    behavior Phase-1 #4 closed)."""
+    from identity.badge_verifier import fetch_first_vc_jwt
+
+    well_known = (
+        "http://identity.test/v1alpha1/vc/AGNTCY-abc/.well-known/vcs.json"
+    )
+    with respx.mock:
+        respx.get(well_known).mock(return_value=httpx.Response(200, json={
+            "vcs": [{
+                "envelopeType": "CREDENTIAL_ENVELOPE_TYPE_JOSE",
+                "value": _b64_jwt({"agent_id": "some-other-agent"}),
+            }],
+        }))
+        with pytest.raises(LookupError, match="agent_id"):
+            await fetch_first_vc_jwt(
+                "http://identity.test", "AGNTCY-abc",
+                expected_agent_id=AGENT_ID,
+            )
 
 
 def test_cimd_server_returns_503_when_unconfigured(monkeypatch):
