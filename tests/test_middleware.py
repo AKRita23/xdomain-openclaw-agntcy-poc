@@ -1,44 +1,89 @@
-"""Tests for AGNTCY TBAC middleware."""
+"""Tests for AGNTCY TBAC middleware (Phase-1 hardened contract).
+
+The Phase-1 hardening intentionally broke three behaviors that previously
+made these tests pass; the tests below have been updated to assert the
+new contract:
+
+  * Scope subset is now computed from the VERIFIER's ``capabilities``
+    (verified result), never the caller dict's ``task_scopes``.
+  * Empty / missing verified capabilities now DENY (was: open badge).
+  * TTL gate now reads ``issuance_date`` (snake_case) from the verifier
+    result; missing now DENIES (was: skipped).
+
+The fixture below lets each test stub the verifier's return value to
+exercise specific paths. Where the old behavior was the bug (fail-open
+on empty caps / missing issuance), the test is inverted with an explicit
+comment so the contract reversal is documented in-place.
+"""
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
+
 from middleware.agntcy_tbac import IdentityServiceMCPMiddleware, TBACViolation
 
 
-@pytest.fixture
-def middleware():
+def _fresh_iso() -> str:
+    """ISO-8601 timestamp 1h in the past — well within the 24h TTL."""
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+
+def _make_verification(
+    *,
+    valid: bool = True,
+    capabilities: Optional[List[Any]] = None,
+    issuance_date: Optional[str] = None,
+    delegating_user: str = "sarah@example.com",
+    agent_id: str = "openclaw-agent-001",
+    badge_id: str = "badge-test",
+) -> Dict[str, Any]:
+    """Build a verifier-result dict in the shape :class:`BadgeVerifier` returns."""
+    if not valid:
+        return {"valid": False, "reason": "Badge JWT has expired"}
+    return {
+        "valid": True,
+        "badge_id": badge_id,
+        "capabilities": (
+            capabilities if capabilities is not None
+            else ["weather:read"]
+        ),
+        "delegating_user": delegating_user,
+        "agent_id": agent_id,
+        "issuer": "did:web:example.com:issuer",
+        "issuance_date": issuance_date or _fresh_iso(),
+    }
+
+
+def _mw_with(verification: Dict[str, Any]) -> IdentityServiceMCPMiddleware:
     mw = IdentityServiceMCPMiddleware("http://localhost:8080")
-    # Mock the verifier so tests don't require a real JWKS endpoint
-    mw.verifier.verify_badge = AsyncMock(
-        return_value={"valid": True, "badge_id": "badge-test"}
-    )
+    mw.verifier.verify_badge = AsyncMock(return_value=verification)
     return mw
 
 
-def _make_badge(scopes=None, capabilities=None, issuance_date=None):
-    badge = {
+def _make_badge() -> Dict[str, Any]:
+    """Caller-supplied badge dict — task_scopes here MUST be ignored."""
+    return {
         "badge_id": "badge-test",
         "jwt": "eyJ.test.token",
-        "task_scopes": scopes or [],
+        "task_scopes": ["weather:read", "totally:bogus:scope"],  # noise
     }
-    if capabilities is not None:
-        badge["capabilities"] = capabilities
-    if issuance_date is not None:
-        badge["issuanceDate"] = issuance_date
-    return badge
 
 
-def _make_xaa_token(task=None):
+def _make_xaa_token(task: Optional[str] = None) -> Dict[str, Any]:
     token = {"access_token": "xaa-test-token", "token_type": "Bearer"}
     if task is not None:
         token["task"] = task
     return token
 
 
+# --------------------------------------------------------------------------- happy path
+
+
 @pytest.mark.asyncio
-async def test_enforce_allows_valid_request(middleware):
-    await middleware.enforce(
+async def test_enforce_allows_valid_request():
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
+    await mw.enforce(
         badge=_make_badge(),
         target_server="weather",
         requested_scopes=["weather:read"],
@@ -46,12 +91,15 @@ async def test_enforce_allows_valid_request(middleware):
     )
 
 
+# --------------------------------------------------------------------------- scope subset
+
+
 @pytest.mark.asyncio
-async def test_enforce_blocks_scope_escalation(middleware):
-    badge = _make_badge(scopes=["weather:read"])
+async def test_enforce_blocks_scope_escalation():
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
     with pytest.raises(TBACViolation, match="Scope escalation"):
-        await middleware.enforce(
-            badge=badge,
+        await mw.enforce(
+            badge=_make_badge(),
             target_server="weather",
             requested_scopes=["weather:read", "weather:admin"],
             xaa_token=_make_xaa_token(),
@@ -59,9 +107,67 @@ async def test_enforce_blocks_scope_escalation(middleware):
 
 
 @pytest.mark.asyncio
-async def test_enforce_blocks_missing_token(middleware):
+async def test_enforce_ignores_caller_supplied_task_scopes():
+    """Phase-1 fix #1: the caller's badge["task_scopes"] is untrusted.
+
+    The badge dict claims ``totally:bogus:scope`` but the VERIFIED set
+    only contains ``weather:read``. Requesting the bogus scope must DENY.
+    """
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
+    with pytest.raises(TBACViolation, match="Scope escalation"):
+        await mw.enforce(
+            badge=_make_badge(),  # task_scopes includes "totally:bogus:scope"
+            target_server="weather",
+            requested_scopes=["totally:bogus:scope"],
+            xaa_token=_make_xaa_token(),
+        )
+
+
+# --------------------------------------------------------------------------- empty caps deny
+
+
+@pytest.mark.asyncio
+async def test_enforce_denies_empty_verified_capabilities():
+    """Phase-1 fix #2: was a fail-open ("open badge model"); now DENIES.
+
+    A verified badge with no capabilities cannot authorize anything.
+    """
+    mw = _mw_with(_make_verification(capabilities=[]))
+    with pytest.raises(TBACViolation, match="no authorized scopes"):
+        await mw.enforce(
+            badge=_make_badge(),
+            target_server="anything",
+            requested_scopes=["weather:read"],
+            xaa_token=_make_xaa_token(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_enforce_denies_missing_capabilities_field():
+    """Even if the verifier omits the key entirely, fail closed."""
+    verification = {
+        "valid": True, "badge_id": "x",
+        "issuance_date": _fresh_iso(),
+        # no "capabilities" key
+    }
+    mw = _mw_with(verification)
+    with pytest.raises(TBACViolation, match="no authorized scopes"):
+        await mw.enforce(
+            badge=_make_badge(),
+            target_server="weather",
+            requested_scopes=["weather:read"],
+            xaa_token=_make_xaa_token(),
+        )
+
+
+# --------------------------------------------------------------------------- xaa_token check
+
+
+@pytest.mark.asyncio
+async def test_enforce_blocks_missing_token():
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
     with pytest.raises(TBACViolation, match="Missing XAA"):
-        await middleware.enforce(
+        await mw.enforce(
             badge=_make_badge(),
             target_server="weather",
             requested_scopes=["weather:read"],
@@ -69,13 +175,12 @@ async def test_enforce_blocks_missing_token(middleware):
         )
 
 
+# --------------------------------------------------------------------------- badge invalidity
+
+
 @pytest.mark.asyncio
 async def test_enforce_blocks_invalid_badge():
-    """When badge verification fails, enforce raises TBACViolation."""
-    mw = IdentityServiceMCPMiddleware("http://localhost:8080")
-    mw.verifier.verify_badge = AsyncMock(
-        return_value={"valid": False, "reason": "Badge JWT has expired"}
-    )
+    mw = _mw_with(_make_verification(valid=False))
     with pytest.raises(TBACViolation, match="Badge verification failed"):
         await mw.enforce(
             badge=_make_badge(),
@@ -85,50 +190,72 @@ async def test_enforce_blocks_invalid_badge():
         )
 
 
-# --- Task context validation tests ---
+# --------------------------------------------------------------------------- task validation
 
 
 @pytest.mark.asyncio
-async def test_enforce_allows_correct_task(middleware):
-    """When task claim matches, enforce passes."""
-    await middleware.enforce(
+async def test_enforce_allows_correct_task():
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
+    await mw.enforce(
         badge=_make_badge(),
         target_server="weather",
         requested_scopes=["weather:read"],
         xaa_token=_make_xaa_token(task="weather_slack_notification"),
+        expected_task="weather_slack_notification",
     )
 
 
 @pytest.mark.asyncio
-async def test_enforce_allows_missing_task(middleware):
-    """When task claim is absent, enforce passes (no constraint)."""
-    await middleware.enforce(
-        badge=_make_badge(),
-        target_server="weather",
-        requested_scopes=["weather:read"],
-        xaa_token=_make_xaa_token(),
-    )
-
-
-@pytest.mark.asyncio
-async def test_enforce_blocks_task_mismatch(middleware):
+async def test_enforce_blocks_task_mismatch():
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
     with pytest.raises(TBACViolation, match="Task mismatch"):
-        await middleware.enforce(
+        await mw.enforce(
             badge=_make_badge(),
             target_server="weather",
             requested_scopes=["weather:read"],
             xaa_token=_make_xaa_token(task="exfiltrate_data"),
+            expected_task="weather_slack_notification",
         )
 
 
-# --- Domain validation tests ---
+@pytest.mark.asyncio
+async def test_enforce_blocks_missing_task_when_expected():
+    """When expected_task is set, a missing xaa_token.task must DENY."""
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
+    with pytest.raises(TBACViolation, match="Task mismatch"):
+        await mw.enforce(
+            badge=_make_badge(),
+            target_server="weather",
+            requested_scopes=["weather:read"],
+            xaa_token=_make_xaa_token(),  # no task
+            expected_task="weather_slack_notification",
+        )
 
 
 @pytest.mark.asyncio
-async def test_enforce_allows_authorized_domain(middleware):
-    caps = [{"domain": "weather"}, {"domain": "slack"}]
-    await middleware.enforce(
-        badge=_make_badge(capabilities=caps),
+async def test_enforce_no_task_constraint_when_expected_task_omitted():
+    """If the caller doesn't pin a task, the middleware imposes none."""
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
+    await mw.enforce(
+        badge=_make_badge(),
+        target_server="weather",
+        requested_scopes=["weather:read"],
+        xaa_token=_make_xaa_token(task="whatever"),
+    )
+
+
+# --------------------------------------------------------------------------- domain validation
+
+
+@pytest.mark.asyncio
+async def test_enforce_allows_authorized_domain():
+    caps = [
+        {"scope": "weather:read", "domain": "weather"},
+        {"scope": "slack:chat:write", "domain": "slack"},
+    ]
+    mw = _mw_with(_make_verification(capabilities=caps))
+    await mw.enforce(
+        badge=_make_badge(),
         target_server="weather",
         requested_scopes=["weather:read"],
         xaa_token=_make_xaa_token(),
@@ -136,60 +263,102 @@ async def test_enforce_allows_authorized_domain(middleware):
 
 
 @pytest.mark.asyncio
-async def test_enforce_allows_empty_capabilities(middleware):
-    """Empty capabilities list = open badge model, no domain restriction."""
-    await middleware.enforce(
-        badge=_make_badge(capabilities=[]),
-        target_server="anything",
-        requested_scopes=[],
-        xaa_token=_make_xaa_token(),
-    )
-
-
-@pytest.mark.asyncio
-async def test_enforce_blocks_unauthorized_domain(middleware):
-    caps = [{"domain": "weather"}]
+async def test_enforce_blocks_unauthorized_domain():
+    caps = [{"scope": "weather:read", "domain": "weather"}]
+    mw = _mw_with(_make_verification(capabilities=caps))
     with pytest.raises(TBACViolation, match="Domain .* not authorized"):
-        await middleware.enforce(
-            badge=_make_badge(capabilities=caps),
+        await mw.enforce(
+            badge=_make_badge(),
             target_server="slack",
-            requested_scopes=[],
+            requested_scopes=["weather:read"],
             xaa_token=_make_xaa_token(),
         )
 
 
-# --- Badge TTL validation tests ---
+# --------------------------------------------------------------------------- TTL gate
 
 
 @pytest.mark.asyncio
-async def test_enforce_allows_fresh_badge(middleware):
-    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    await middleware.enforce(
-        badge=_make_badge(issuance_date=fresh),
-        target_server="weather",
-        requested_scopes=[],
-        xaa_token=_make_xaa_token(),
-    )
-
-
-@pytest.mark.asyncio
-async def test_enforce_blocks_expired_badge(middleware):
-    old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    with pytest.raises(TBACViolation, match="exceeded 24h TTL"):
-        await middleware.enforce(
-            badge=_make_badge(issuance_date=old),
-            target_server="weather",
-            requested_scopes=[],
-            xaa_token=_make_xaa_token(),
-        )
-
-
-@pytest.mark.asyncio
-async def test_enforce_allows_no_issuance_date(middleware):
-    """No issuanceDate = skip TTL check."""
-    await middleware.enforce(
+async def test_enforce_allows_fresh_badge():
+    mw = _mw_with(_make_verification(
+        capabilities=["weather:read"], issuance_date=_fresh_iso(),
+    ))
+    await mw.enforce(
         badge=_make_badge(),
         target_server="weather",
-        requested_scopes=[],
+        requested_scopes=["weather:read"],
         xaa_token=_make_xaa_token(),
     )
+
+
+@pytest.mark.asyncio
+async def test_enforce_blocks_expired_badge():
+    old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    mw = _mw_with(_make_verification(
+        capabilities=["weather:read"], issuance_date=old,
+    ))
+    with pytest.raises(TBACViolation, match="exceeded 24h TTL"):
+        await mw.enforce(
+            badge=_make_badge(),
+            target_server="weather",
+            requested_scopes=["weather:read"],
+            xaa_token=_make_xaa_token(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_enforce_denies_missing_issuance_date():
+    """Phase-1 fix #3: was a fail-open (skipped TTL); now DENIES.
+
+    The old code read ``badge["issuanceDate"]`` (camelCase) which never
+    existed on the badge dict, so the TTL check was dead code. Now the
+    verifier's ``issuance_date`` is required.
+    """
+    verification = {
+        "valid": True, "badge_id": "x",
+        "capabilities": ["weather:read"],
+        # no issuance_date
+    }
+    mw = _mw_with(verification)
+    with pytest.raises(TBACViolation, match="no issuance_date"):
+        await mw.enforce(
+            badge=_make_badge(),
+            target_server="weather",
+            requested_scopes=["weather:read"],
+            xaa_token=_make_xaa_token(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_enforce_denies_unparseable_issuance_date():
+    mw = _mw_with(_make_verification(
+        capabilities=["weather:read"], issuance_date="not-a-date",
+    ))
+    with pytest.raises(TBACViolation, match="unparseable"):
+        await mw.enforce(
+            badge=_make_badge(),
+            target_server="weather",
+            requested_scopes=["weather:read"],
+            xaa_token=_make_xaa_token(),
+        )
+
+
+# --------------------------------------------------------------------------- identity binding
+
+
+@pytest.mark.asyncio
+async def test_enforce_threads_expected_identity_to_verifier():
+    """Phase-1 fix #4 plumbing: middleware must forward expected_* to verifier."""
+    mw = _mw_with(_make_verification(capabilities=["weather:read"]))
+    await mw.enforce(
+        badge=_make_badge(),
+        target_server="weather",
+        requested_scopes=["weather:read"],
+        xaa_token=_make_xaa_token(),
+        expected_agent_id="openclaw-agent-001",
+        expected_user="sarah@example.com",
+    )
+    mw.verifier.verify_badge.assert_awaited_once()
+    kwargs = mw.verifier.verify_badge.await_args.kwargs
+    assert kwargs["expected_agent_id"] == "openclaw-agent-001"
+    assert kwargs["expected_user"] == "sarah@example.com"

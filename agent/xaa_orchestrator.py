@@ -195,16 +195,23 @@ class XAAOrchestrator:
                 issuer,
             )
 
-            # ----- Step 2: Badge verify -----
+            # ----- Step 2: Badge verify (with identity binding) -----
             step = STEP_BADGE_VERIFY
             logger.info("[2/6] 🔐 Verifying badge signature...")
-            verification = await self.badge_verifier.verify_badge(badge)
+            verification = await self.badge_verifier.verify_badge(
+                badge,
+                expected_agent_id=self.config.agent_id,
+                expected_user=subject,
+            )
             if not verification.get("valid"):
                 raise XAAFlowError(
                     step=STEP_BADGE_VERIFY,
                     reason=f"badge verification failed: {verification.get('reason', 'unknown')}",
                 )
-            capabilities = verification.get("capabilities") or badge.get("task_scopes", [])
+            # Phase-1 fix #1: capabilities used downstream MUST come from the
+            # verified result, never from the caller-supplied badge dict's
+            # task_scopes (which is tamperable between issue and verify).
+            capabilities = verification.get("capabilities", [])
             logger.info(
                 "[2/6] ✅ Badge verified, capabilities: %s", capabilities
             )
@@ -247,7 +254,11 @@ class XAAOrchestrator:
                 try:
                     id_jag_response = (
                         await self.xaa_dev_client
-                        .exchange_id_token_for_id_jag(id_token, scope=scope_str)
+                        .exchange_id_token_for_id_jag(
+                            id_token,
+                            scope=scope_str,
+                            actor_token=badge.get("jwt", "") or None,
+                        )
                     )
                 except XAADevError as exc:
                     raise XAAFlowError(
@@ -370,6 +381,9 @@ class XAAOrchestrator:
                 target_server=target_audience,
                 requested_scopes=scopes,
                 xaa_token=xaa_token_dict,
+                expected_agent_id=self.config.agent_id,
+                expected_user=subject,
+                expected_task=task_name,
             )
             logger.info("[5/6] ✅ TBAC ALLOW")
 

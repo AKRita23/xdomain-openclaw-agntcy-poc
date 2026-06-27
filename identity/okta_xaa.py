@@ -177,8 +177,10 @@ class OktaXAAClient:
             f"https://{self.org2_domain}/oauth2/v1/token"
         )
         logger.info(
-            "Exchanging Sarah's token at Org 2: %s audience=%s scopes=%s",
+            "Exchanging Sarah's token at Org 2: %s audience=%s scopes=%s "
+            "actor_token=%s",
             org2_token_endpoint, resolved_audience, scopes,
+            "<badge_jwt>" if badge_jwt else "<absent>",
         )
         exchange_data = {
             "grant_type": self.TOKEN_EXCHANGE_GRANT,
@@ -191,6 +193,15 @@ class OktaXAAClient:
             "resource": resolved_audience,
             "scope": " ".join(scopes) if scopes else "",
         }
+        # Phase-1 fix #5: re-wire AGNTCY badge as actor_token (RFC 8693 §2.1).
+        # Git history shows actor_token was wired through ba99c60→aa6cfc0→e7287d8
+        # and REMOVED in 959fbd6 ("Implement Sarah token XAA exchange...") when
+        # the flow pivoted to Sarah's pre-obtained subject_token. The
+        # ``badge_jwt`` parameter survived as dead weight; the delegation-proof
+        # leg of the architecture did not.
+        if badge_jwt:
+            exchange_data["actor_token"] = badge_jwt
+            exchange_data["actor_token_type"] = self.JWT_TOKEN_TYPE
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(org2_token_endpoint, data=exchange_data)
@@ -206,6 +217,15 @@ class OktaXAAClient:
 
         result = resp.json()
         logger.info("Token exchange complete: obtained scoped access token")
+
+        # Phase-1 fix #5: make "did Okta echo `act`?" reproducible from logs.
+        # PoC-grade observation only — the resource auth server is authoritative
+        # for signature; here we just decode and report claim presence.
+        _log_act_claim_presence(
+            label="Okta ID-JAG",
+            token=result.get("access_token", ""),
+            actor_token_was_sent=bool(badge_jwt),
+        )
 
         self._validate_token_response(result, resolved_audience)
         return result
@@ -253,3 +273,45 @@ class OktaXAAClient:
         except jwt.DecodeError:
             # Opaque tokens don't have decodable claims — skip aud check
             logger.info("Token is opaque (non-JWT), skipping audience validation")
+
+
+def _log_act_claim_presence(
+    label: str, token: str, actor_token_was_sent: bool,
+) -> None:
+    """Decode an ID-JAG (no signature check) and log whether ``act`` is present.
+
+    This is the *reproducible observation* the blog centerpiece rests on:
+    after wiring AGNTCY badge as ``actor_token``, does the issued ID-JAG
+    carry an ``act`` claim echoing the delegation chain? Each call emits
+    one line at INFO so the answer is grep-able from log output alone.
+    """
+    if not token:
+        logger.info(
+            "[%s] act-claim observation: cannot decode (empty token); "
+            "actor_token sent=%s",
+            label, actor_token_was_sent,
+        )
+        return
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.exceptions.DecodeError as exc:
+        logger.info(
+            "[%s] act-claim observation: token is opaque/undecodable (%s); "
+            "actor_token sent=%s",
+            label, exc, actor_token_was_sent,
+        )
+        return
+
+    act = claims.get("act")
+    if act is None:
+        logger.info(
+            "[%s] act-claim observation: act claim ABSENT in issued token; "
+            "actor_token sent=%s",
+            label, actor_token_was_sent,
+        )
+    else:
+        logger.info(
+            "[%s] act-claim observation: act claim PRESENT (%s); "
+            "actor_token sent=%s",
+            label, act, actor_token_was_sent,
+        )
