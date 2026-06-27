@@ -88,6 +88,17 @@ class AgentConfig:
     xaa_resource_audience: str = os.getenv("XAA_RESOURCE_AUDIENCE", "")
     xaa_scope: str = os.getenv("XAA_SCOPE", "openid email")
 
+    # CIMD (Client ID Metadata Document) discovery — Phase 2.
+    # When ``use_cimd_discovery`` is True, step 1 of the XAA flow
+    # resolves the agent's CIMD URL (its OAuth client_id) and uses the
+    # inline AGNTCY badge from that document, bypassing the env-var
+    # BadgeIssuer. The same badge JWT is then sent as actor_token in
+    # step 3 — discovery and runtime paths reference the same artifact.
+    use_cimd_discovery: bool = (
+        os.getenv("USE_CIMD_DISCOVERY", "false").lower() == "true"
+    )
+    cimd_client_id: str = os.getenv("CIMD_CLIENT_ID", "")
+
     # Delegating user
     delegating_user: str = os.getenv("DELEGATING_USER", "sarah@example.com")
 

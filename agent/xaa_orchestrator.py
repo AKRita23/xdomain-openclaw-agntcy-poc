@@ -42,6 +42,7 @@ from identity.resource_exchange import (
     ResourceAccessToken,
     exchange_id_jag_for_access_token,
 )
+from identity.cimd_resolver import CIMDResolutionError, CIMDResolver
 from identity.xaa_dev_client import XAADevClient, XAADevConfig, XAADevError
 from mcp_servers.slack_mcp import SlackMCPClient
 from mcp_servers.weather_mcp import WeatherMCPClient
@@ -110,6 +111,8 @@ class XAAOrchestrator:
     token_cache: CachedTokenStore = field(default_factory=CachedTokenStore)
     resource_client_id: Optional[str] = None
     xaa_dev_client: Optional[XAADevClient] = None
+    cimd_resolver: Optional[CIMDResolver] = None
+    cimd_client_id: Optional[str] = None
 
     @classmethod
     def from_config(
@@ -164,6 +167,18 @@ class XAAOrchestrator:
             slack_client=SlackMCPClient(cfg.mcp_servers["slack"]),
             token_cache=token_cache or CachedTokenStore(),
             xaa_dev_client=xaa_dev_client,
+            cimd_resolver=(
+                CIMDResolver(BadgeVerifier(
+                    cfg.identity_service_url, metadata_id=cfg.agntcy_metadata_id,
+                ))
+                if cfg.use_cimd_discovery and cfg.cimd_client_id
+                else None
+            ),
+            cimd_client_id=(
+                cfg.cimd_client_id
+                if cfg.use_cimd_discovery and cfg.cimd_client_id
+                else None
+            ),
         )
 
     async def execute(
@@ -179,14 +194,50 @@ class XAAOrchestrator:
 
         step = STEP_BADGE_FETCH
         try:
-            # ----- Step 1: Badge fetch -----
-            logger.info("[1/6] 🎫 Fetching AGNTCY badge for %s...", subject)
-            badge = await self.badge_issuer.issue_badge(
-                agent_id=self.config.agent_id,
-                delegating_user=subject,
-                issuer_did=self.config.issuer_did,
-                task_scopes=scopes,
-            )
+            # ----- Step 1: Badge discovery -----
+            # Two paths, same artifact:
+            #   * CIMD discovery (Phase 2) — resolve the agent's CIMD
+            #     ``client_id`` URL, which embeds the AGNTCY badge inline
+            #     as ``vc+jwt``. The resolver self-ref-checks the
+            #     document and (via Phase-1 fix #4) refuses badges whose
+            #     verified identity doesn't match the document's
+            #     declared agent_id / delegating_user.
+            #   * Env-var fetch (legacy) — :class:`BadgeIssuer` pulls
+            #     the badge JWT directly from AGNTCY's well-known
+            #     endpoint configured via env vars.
+            # The badge JWT obtained here is what's later sent as
+            # ``actor_token`` in the XAA exchange (Phase-1 fix #5) —
+            # discovery and runtime paths converge on the same badge.
+            if self.cimd_resolver is not None and self.cimd_client_id:
+                logger.info(
+                    "[1/6] 🔎 Resolving CIMD client_id %s...",
+                    self.cimd_client_id,
+                )
+                try:
+                    resolved = await self.cimd_resolver.resolve(
+                        self.cimd_client_id,
+                    )
+                except CIMDResolutionError as exc:
+                    raise XAAFlowError(
+                        step=STEP_BADGE_FETCH,
+                        reason=f"CIMD discovery failed: {exc.reason}",
+                        cause=exc,
+                    ) from exc
+                badge = resolved.as_badge_dict()
+                logger.info(
+                    "[1/6] ✅ CIMD-discovered badge: agent_id=%s user=%s "
+                    "capabilities=%s",
+                    resolved.agent_id, resolved.delegating_user,
+                    resolved.capabilities,
+                )
+            else:
+                logger.info("[1/6] 🎫 Fetching AGNTCY badge for %s...", subject)
+                badge = await self.badge_issuer.issue_badge(
+                    agent_id=self.config.agent_id,
+                    delegating_user=subject,
+                    issuer_did=self.config.issuer_did,
+                    task_scopes=scopes,
+                )
             badge_id = badge.get("badge_id", "<unknown>")
             issuer = badge.get("issuer_did") or badge.get("issuer") or "<unknown>"
             logger.info(

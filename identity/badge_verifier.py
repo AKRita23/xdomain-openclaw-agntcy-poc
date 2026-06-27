@@ -65,23 +65,13 @@ class BadgeVerifier:
         well-known smoke check.
         """
         async with httpx.AsyncClient(timeout=30.0) as client:
-            well_known_url = (
-                f"{self.node_url}/v1alpha1/vc/{self.metadata_id}"
-                f"/.well-known/vcs.json"
-            )
             try:
-                resp = await client.get(well_known_url)
-            except httpx.HTTPError as e:
-                return {"valid": False, "reason": f"Failed to fetch badge: {e}"}
+                vcs_list = await _fetch_vcs_list(
+                    client, self.node_url, self.metadata_id,
+                )
+            except _WellKnownError as e:
+                return {"valid": False, "reason": str(e)}
 
-            if resp.status_code != 200:
-                return {
-                    "valid": False,
-                    "reason": f"Well-known endpoint returned {resp.status_code}",
-                }
-
-            vcs_data = resp.json()
-            vcs_list = vcs_data.get("vcs", [])
             if not vcs_list:
                 return {"valid": False, "reason": "No VCs found at well-known endpoint"}
 
@@ -254,6 +244,71 @@ class BadgeVerifier:
             "issuer": issuer,
             "issuance_date": issuance_date,
         }
+
+
+class _WellKnownError(Exception):
+    """Internal error raised when fetching the AGNTCY well-known VCs list."""
+
+
+def _well_known_url(node_url: str, metadata_id: str) -> str:
+    """Canonical AGNTCY well-known URL for a given ``metadata_id``."""
+    return f"{node_url.rstrip('/')}/v1alpha1/vc/{metadata_id}/.well-known/vcs.json"
+
+
+async def _fetch_vcs_list(
+    client: httpx.AsyncClient, node_url: str, metadata_id: str,
+) -> List[Dict[str, Any]]:
+    """Fetch the raw ``vcs`` array from the AGNTCY well-known endpoint.
+
+    Single source of truth for the URL pattern + transport behavior used
+    by :meth:`BadgeVerifier.fetch_and_verify` and the CIMD document
+    builder. Returns the list (possibly empty); raises
+    :class:`_WellKnownError` on transport / non-200 / non-JSON failures.
+    """
+    url = _well_known_url(node_url, metadata_id)
+    try:
+        resp = await client.get(url)
+    except httpx.HTTPError as e:
+        raise _WellKnownError(f"Failed to fetch badge: {e}") from e
+    if resp.status_code != 200:
+        raise _WellKnownError(
+            f"Well-known endpoint returned {resp.status_code}"
+        )
+    try:
+        payload = resp.json()
+    except ValueError as e:
+        raise _WellKnownError(f"Well-known body was not JSON: {e}") from e
+    vcs = payload.get("vcs")
+    return vcs if isinstance(vcs, list) else []
+
+
+async def fetch_first_vc_jwt(
+    node_url: str, metadata_id: str,
+    envelope_type: str = BadgeVerifier.ENVELOPE_TYPE,
+) -> str:
+    """Return the first VC JWT whose envelope matches ``envelope_type``.
+
+    Public helper for callers that need just the badge JWT (e.g. the CIMD
+    document builder) without running it through the Identity Node
+    verifier first. Reuses :func:`_fetch_vcs_list` so the well-known URL
+    pattern is defined in exactly one place.
+
+    Raises ``LookupError`` if the well-known endpoint has no matching VC,
+    or the underlying transport error (via :class:`_WellKnownError`)
+    surfaces.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        vcs_list = await _fetch_vcs_list(client, node_url, metadata_id)
+    for vc in vcs_list:
+        if vc.get("envelopeType") != envelope_type:
+            continue
+        value = vc.get("value", "")
+        if value:
+            return value
+    raise LookupError(
+        f"no VC with envelopeType={envelope_type!r} at "
+        f"{_well_known_url(node_url, metadata_id)}"
+    )
 
 
 def _check_jwt_exp(token: str) -> Dict[str, Any]:
